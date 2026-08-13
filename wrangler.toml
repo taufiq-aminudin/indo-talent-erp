@@ -9,4 +9,4 @@ binding = "ASSETS"
 [[d1_databases]]
 binding = "DB"
 database_name = "indo-talent-erp"
-database_id = "REPLACE_WITH_D1_DATABASE_ID"
+database_id = "2901e875-ceb0-4f2e-8a29-ea827cf7dea3"
