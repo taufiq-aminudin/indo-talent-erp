@@ -1,0 +1,15 @@
+PROPRIETARY SOFTWARE LICENSE
+
+Copyright (c) 2026 Indo-Talent / Surya Utama International.
+
+All rights reserved.
+
+This source code and associated application materials are proprietary.
+No permission is granted to copy, modify, publish, distribute, sublicense,
+sell, rent, lease, or create derivative works from this software except
+under a separate written agreement from the copyright owner.
+
+Viewing this public repository does not grant any license or ownership
+rights in the software.
+
+Third-party components, if any, may be subject to separate licenses.

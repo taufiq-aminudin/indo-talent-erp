@@ -1,0 +1,12 @@
+name = "indo-talent-erp"
+main = "worker.js"
+compatibility_date = "2026-08-13"
+
+[assets]
+directory = "./assets"
+binding = "ASSETS"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "indo-talent-erp"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
