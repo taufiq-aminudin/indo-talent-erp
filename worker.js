@@ -1,216 +1,30 @@
-const json=(data,status=200,extra={})=>new Response(JSON.stringify(data),{
- status,headers:{"content-type":"application/json;charset=UTF-8","cache-control":"no-store",...extra}
-});
-const withSecurity=(response)=>{
- const h=new Headers(response.headers);
- h.set("X-Content-Type-Options","nosniff");
- h.set("X-Frame-Options","DENY");
- h.set("Referrer-Policy","strict-origin-when-cross-origin");
- h.set("Permissions-Policy","camera=(),microphone=(),geolocation=()");
- h.set("Access-Control-Allow-Origin","*");
- h.set("Access-Control-Allow-Headers","Content-Type, Authorization");
- h.set("Access-Control-Allow-Methods","GET,POST,PUT,DELETE,OPTIONS");
- return new Response(response.body,{status:response.status,headers:h});
-};
-const uid=()=>crypto.randomUUID();
-
-async function hashPassword(password){
- const enc=new TextEncoder(),salt=crypto.getRandomValues(new Uint8Array(16));
- const key=await crypto.subtle.importKey("raw",enc.encode(password),"PBKDF2",false,["deriveBits"]);
- const bits=await crypto.subtle.deriveBits({name:"PBKDF2",salt,iterations:120000,hash:"SHA-256"},key,256);
- return `${btoa(String.fromCharCode(...salt))}.${btoa(String.fromCharCode(...new Uint8Array(bits)))}`;
-}
-async function verifyPassword(password,stored){
- try{
-  const [s,h]=stored.split(".");
-  const salt=Uint8Array.from(atob(s),c=>c.charCodeAt(0));
-  const enc=new TextEncoder();
-  const key=await crypto.subtle.importKey("raw",enc.encode(password),"PBKDF2",false,["deriveBits"]);
-  const bits=await crypto.subtle.deriveBits({name:"PBKDF2",salt,iterations:120000,hash:"SHA-256"},key,256);
-  return btoa(String.fromCharCode(...new Uint8Array(bits)))===h;
- }catch{return false}
-}
-function tokenOf(request){const h=request.headers.get("Authorization")||"";return h.startsWith("Bearer ")?h.slice(7):""}
-async function currentUser(request,env){
- const t=tokenOf(request); if(!t)return null;
- return await env.DB.prepare(`SELECT u.id,u.name,u.email,u.role,u.phone,u.company_name
- FROM sessions s JOIN users u ON u.id=s.user_id
- WHERE s.token=? AND s.expires_at>? AND u.is_active=1`).bind(t,Date.now()).first();
-}
-async function guard(request,env,roles=[]){
- const user=await currentUser(request,env);
- if(!user)return {error:json({success:false,error:"Unauthorized"},401)};
- if(roles.length&&!roles.includes(user.role))return {error:json({success:false,error:"Forbidden"},403)};
- return {user};
-}
-async function audit(env,actor,action,type,id,details=""){
- await env.DB.prepare("INSERT INTO audit_logs(id,actor_id,action,entity_type,entity_id,details) VALUES(?,?,?,?,?,?)")
- .bind(uid(),actor,action,type,id,details).run();
-}
-async function seed(env){
- const row=await env.DB.prepare("SELECT COUNT(*) c FROM users").first();
- if(row?.c)return;
- for(const [email,name,role,pw,company] of [
-  ["admin@indo-talent.my.id","Indo-Talent Admin","admin","Admin123!",""],
-  ["company@indo-talent.my.id","Demo Company","company","Company123!","Demo Company"],
-  ["candidate@indo-talent.my.id","Demo Candidate","candidate","Candidate123!",""]
- ]){
-  const id=uid();
-  await env.DB.prepare("INSERT INTO users(id,name,email,password_hash,role,company_name) VALUES(?,?,?,?,?,?)")
-   .bind(id,name,email,await hashPassword(pw),role,company).run();
-  await env.DB.prepare("INSERT INTO profiles(user_id) VALUES(?)").bind(id).run();
- }
- const c=await env.DB.prepare("SELECT id FROM users WHERE email=?").bind("company@indo-talent.my.id").first();
- await env.DB.prepare(`INSERT INTO jobs(id,company_id,title,location,employment_type,workplace_type,salary_min,salary_max,description,requirements)
- VALUES(?,?,?,?,?,?,?,?,?,?)`).bind(uid(),c.id,"Human Resources Manager","Jakarta, Indonesia","Full Time","On-site",25000000,40000000,
- "Lead HR strategy, talent acquisition, employee relations and compliance.",
- "3–5 years HR management experience; strong labor law and talent management knowledge; Mandarin preferred.").run();
-}
-
-async function api(request,env){
- await seed(env);
- const url=new URL(request.url),path=url.pathname.replace(/^\/api/,"")||"/",method=request.method;
- if(method==="OPTIONS")return new Response(null,{status:204});
-
- if(method==="GET"&&path==="/health")return json({success:true,service:"indo-talent-erp",version:"2.0"});
-
- if(method==="POST"&&path==="/auth/register"){
-  const b=await request.json(),email=String(b.email||"").trim().toLowerCase(),password=String(b.password||"");
-  const role=["candidate","company"].includes(b.role)?b.role:"candidate";
-  if(!b.name||!email||password.length<8)return json({success:false,error:"Nama, email dan password minimal 8 karakter wajib diisi."},400);
-  if(await env.DB.prepare("SELECT id FROM users WHERE email=?").bind(email).first())return json({success:false,error:"Email sudah terdaftar."},409);
-  const id=uid();
-  await env.DB.prepare("INSERT INTO users(id,name,email,password_hash,role,phone,company_name) VALUES(?,?,?,?,?,?,?)")
-   .bind(id,b.name,email,await hashPassword(password),role,b.phone||"",role==="company"?(b.company_name||b.name):"").run();
-  await env.DB.prepare("INSERT INTO profiles(user_id) VALUES(?)").bind(id).run();
-  return json({success:true,message:"Registrasi berhasil. Silakan login."});
- }
-
- if(method==="POST"&&path==="/auth/login"){
-  const b=await request.json(),email=String(b.email||"").trim().toLowerCase();
-  const user=await env.DB.prepare("SELECT * FROM users WHERE email=? AND is_active=1").bind(email).first();
-  if(!user||!(await verifyPassword(String(b.password||""),user.password_hash)))return json({success:false,error:"Email atau password salah."},401);
-  const token=crypto.randomUUID()+"."+crypto.randomUUID();
-  await env.DB.prepare("INSERT INTO sessions(token,user_id,expires_at) VALUES(?,?,?)").bind(token,user.id,Date.now()+604800000).run();
-  await audit(env,user.id,"login","user",user.id);
-  return json({success:true,token,user:{id:user.id,name:user.name,email:user.email,role:user.role,company_name:user.company_name}});
- }
-
- if(method==="POST"&&path==="/auth/logout"){
-  const t=tokenOf(request);if(t)await env.DB.prepare("DELETE FROM sessions WHERE token=?").bind(t).run();
-  return json({success:true});
- }
-
- if(method==="GET"&&path==="/jobs"){
-  const rows=await env.DB.prepare(`SELECT j.*,u.company_name FROM jobs j JOIN users u ON u.id=j.company_id
-   WHERE j.status='published' AND u.is_active=1 ORDER BY j.created_at DESC`).all();
-  return json({success:true,jobs:rows.results||[]});
- }
-
- if(method==="GET"&&path.startsWith("/jobs/")){
-  const id=path.split("/")[2];
-  const row=await env.DB.prepare(`SELECT j.*,u.company_name FROM jobs j JOIN users u ON u.id=j.company_id WHERE j.id=?`).bind(id).first();
-  return row?json({success:true,job:row}):json({success:false,error:"Job tidak ditemukan"},404);
- }
-
- if(method==="GET"&&path==="/me"){
-  const g=await guard(request,env);if(g.error)return g.error;
-  const p=await env.DB.prepare("SELECT * FROM profiles WHERE user_id=?").bind(g.user.id).first();
-  return json({success:true,user:g.user,profile:p||{}});
- }
-
- if(method==="PUT"&&path==="/me"){
-  const g=await guard(request,env);if(g.error)return g.error;const b=await request.json();
-  await env.DB.prepare("UPDATE users SET name=?,phone=?,company_name=? WHERE id=?")
-   .bind(b.name||g.user.name,b.phone||"",b.company_name||g.user.company_name||"",g.user.id).run();
-  await env.DB.prepare(`INSERT INTO profiles(user_id,headline,education,experience,skills,cv_url,website)
-   VALUES(?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET headline=excluded.headline,education=excluded.education,
-   experience=excluded.experience,skills=excluded.skills,cv_url=excluded.cv_url,website=excluded.website`)
-   .bind(g.user.id,b.headline||"",b.education||"",b.experience||"",b.skills||"",b.cv_url||"",b.website||"").run();
-  await audit(env,g.user.id,"update","profile",g.user.id);
-  return json({success:true});
- }
-
- if(method==="POST"&&path.match(/^\/jobs\/[^/]+\/apply$/)){
-  const g=await guard(request,env,["candidate"]);if(g.error)return g.error;
-  const jobId=path.split("/")[2],b=await request.json();
-  const job=await env.DB.prepare("SELECT id,company_id,title FROM jobs WHERE id=? AND status='published'").bind(jobId).first();
-  if(!job)return json({success:false,error:"Lowongan tidak ditemukan."},404);
-  try{
-   const appId=uid();
-   await env.DB.prepare("INSERT INTO applications(id,job_id,candidate_id,cover_letter) VALUES(?,?,?,?)")
-    .bind(appId,jobId,g.user.id,b.cover_letter||"").run();
-   await env.DB.prepare("INSERT INTO notifications(id,user_id,title,message) VALUES(?,?,?,?)")
-    .bind(uid(),job.company_id,"Lamaran baru",`${g.user.name} melamar ${job.title}`).run();
-   await audit(env,g.user.id,"create","application",appId,job.title);
-   return json({success:true,message:"Lamaran berhasil dikirim."});
-  }catch{return json({success:false,error:"Anda sudah melamar lowongan ini."},409)}
- }
-
- if(method==="GET"&&path==="/applications"){
-  const g=await guard(request,env);if(g.error)return g.error;let rows;
-  if(g.user.role==="candidate")rows=await env.DB.prepare(`SELECT a.*,j.title,j.location,u.company_name FROM applications a
-    JOIN jobs j ON j.id=a.job_id JOIN users u ON u.id=j.company_id WHERE a.candidate_id=? ORDER BY a.created_at DESC`).bind(g.user.id).all();
-  else if(g.user.role==="company")rows=await env.DB.prepare(`SELECT a.*,j.title,j.location,c.name candidate_name,c.email candidate_email,u.company_name
-    FROM applications a JOIN jobs j ON j.id=a.job_id JOIN users c ON c.id=a.candidate_id JOIN users u ON u.id=j.company_id
-    WHERE j.company_id=? ORDER BY a.created_at DESC`).bind(g.user.id).all();
-  else rows=await env.DB.prepare(`SELECT a.*,j.title,j.location,c.name candidate_name,c.email candidate_email,u.company_name
-    FROM applications a JOIN jobs j ON j.id=a.job_id JOIN users c ON c.id=a.candidate_id JOIN users u ON u.id=j.company_id
-    ORDER BY a.created_at DESC`).all();
-  return json({success:true,applications:rows.results||[]});
- }
-
- if(method==="PUT"&&path.match(/^\/applications\/[^/]+$/)){
-  const g=await guard(request,env,["company","admin"]);if(g.error)return g.error;
-  const id=path.split("/")[2],b=await request.json();
-  const allowed=["Applied","Screening","Shortlisted","Interview","Test","Offer","Hired","Rejected"];
-  if(!allowed.includes(b.status))return json({success:false,error:"Status tidak valid."},400);
-  const app=await env.DB.prepare(`SELECT a.id,j.company_id,a.candidate_id FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.id=?`).bind(id).first();
-  if(!app)return json({success:false,error:"Application tidak ditemukan."},404);
-  if(g.user.role==="company"&&app.company_id!==g.user.id)return json({success:false,error:"Tidak berwenang."},403);
-  await env.DB.prepare("UPDATE applications SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?").bind(b.status,id).run();
-  await env.DB.prepare("INSERT INTO notifications(id,user_id,title,message) VALUES(?,?,?,?)")
-   .bind(uid(),app.candidate_id,"Application update",`Status lamaran Anda berubah menjadi ${b.status}.`).run();
-  await audit(env,g.user.id,"update","application",id,b.status);
-  return json({success:true});
- }
-
- if(method==="POST"&&path==="/jobs"){
-  const g=await guard(request,env,["company","admin"]);if(g.error)return g.error;const b=await request.json();
-  if(!b.title)return json({success:false,error:"Judul lowongan wajib diisi."},400);
-  const companyId=g.user.role==="admin"?(b.company_id||g.user.id):g.user.id;
-  if(g.user.role==="admin"&&b.company_id&&!await env.DB.prepare("SELECT id FROM users WHERE id=? AND role='company'").bind(b.company_id).first())
-    return json({success:false,error:"Company tidak valid."},400);
-  const id=uid();
-  await env.DB.prepare(`INSERT INTO jobs(id,company_id,title,location,employment_type,workplace_type,salary_min,salary_max,currency,description,requirements,benefits,status)
-   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id,companyId,b.title,b.location||"",b.employment_type||"Full Time",b.workplace_type||"On-site",
-   Number(b.salary_min||0),Number(b.salary_max||0),"IDR",b.description||"",b.requirements||"",b.benefits||"",b.status||"published").run();
-  await audit(env,g.user.id,"create","job",id,b.title);
-  return json({success:true,id});
- }
-
- if(method==="GET"&&path==="/company/jobs"){
-  const g=await guard(request,env,["company","admin"]);if(g.error)return g.error;
-  const rows=g.user.role==="admin"?await env.DB.prepare(`SELECT j.*,u.company_name FROM jobs j JOIN users u ON u.id=j.company_id ORDER BY j.created_at DESC`).all()
-   :await env.DB.prepare("SELECT * FROM jobs WHERE company_id=? ORDER BY created_at DESC").bind(g.user.id).all();
-  return json({success:true,jobs:rows.results||[]});
- }
-
- if(method==="GET"&&path==="/admin/stats"){
-  const g=await guard(request,env,["admin"]);if(g.error)return g.error;
-  const q=async s=>(await env.DB.prepare(s).first())?.c||0;
-  return json({success:true,stats:{users:await q("SELECT COUNT(*) c FROM users"),companies:await q("SELECT COUNT(*) c FROM users WHERE role='company'"),
-   candidates:await q("SELECT COUNT(*) c FROM users WHERE role='candidate'"),jobs:await q("SELECT COUNT(*) c FROM jobs"),
-   applications:await q("SELECT COUNT(*) c FROM applications"),hired:await q("SELECT COUNT(*) c FROM applications WHERE status='Hired'")}});
- }
-
- return json({success:false,error:"Endpoint tidak ditemukan"},404);
-}
-
-export default {async fetch(request,env){
- try{
-  const u=new URL(request.url);
-  const response=u.pathname.startsWith("/api/")?await api(request,env):await env.ASSETS.fetch(request);
-  return withSecurity(response);
- }catch(e){return withSecurity(json({success:false,error:"Server error",detail:String(e)},500))}
-}};
+const json=(d,s=200)=>new Response(JSON.stringify(d),{status:s,headers:{"content-type":"application/json;charset=UTF-8","cache-control":"no-store"}});const uid=()=>crypto.randomUUID();
+const cors=r=>{const h=new Headers(r.headers);h.set('Access-Control-Allow-Origin','*');h.set('Access-Control-Allow-Headers','Content-Type, Authorization');h.set('Access-Control-Allow-Methods','GET,POST,PUT,OPTIONS');return new Response(r.body,{status:r.status,headers:h})};
+async function hash(p){const b=new TextEncoder().encode(p),x=await crypto.subtle.digest('SHA-256',b);return [...new Uint8Array(x)].map(v=>v.toString(16).padStart(2,'0')).join('')}
+async function userFrom(req,env){const t=req.headers.get('Authorization')?.replace(/^Bearer /,'');if(!t)return null;const s=await env.DB.prepare('SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=? AND s.expires_at>? AND u.is_active=1').bind(t,Date.now()).first();return s||null}
+async function guard(req,env,roles=[]){const u=await userFrom(req,env);if(!u)return {error:json({success:false,error:'Unauthorized'},401)};if(roles.length&&!roles.includes(u.role))return {error:json({success:false,error:'Forbidden'},403)};return {user:u}}
+async function audit(env,actor,action,type,id,details=''){await env.DB.prepare('INSERT INTO audit_logs(id,actor_id,action,entity_type,entity_id,details) VALUES(?,?,?,?,?,?)').bind(uid(),actor,action,type,id,details).run()}
+async function ensureV3(env){await env.DB.prepare(`CREATE TABLE IF NOT EXISTS sessions(token TEXT PRIMARY KEY,user_id TEXT NOT NULL,expires_at INTEGER NOT NULL,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`).run();await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`).run();await env.DB.prepare(`CREATE TABLE IF NOT EXISTS training_courses(id TEXT PRIMARY KEY,title TEXT NOT NULL,description TEXT DEFAULT '',level TEXT DEFAULT 'Basic',duration_hours INTEGER DEFAULT 1,active INTEGER DEFAULT 1,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)`).run();await env.DB.prepare(`CREATE TABLE IF NOT EXISTS training_enrollments(id TEXT PRIMARY KEY,course_id TEXT NOT NULL,user_id TEXT NOT NULL,status TEXT DEFAULT 'Enrolled',progress INTEGER DEFAULT 0,created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,UNIQUE(course_id,user_id))`).run();const n=await env.DB.prepare('SELECT COUNT(*) c FROM training_courses').first();if(!n.c){const rows=[['AI for Recruitment','Practical ChatGPT workflows for sourcing, screening and KPI design','Basic',4],['Recruitment Fundamentals','End-to-end recruitment pipeline and candidate experience','Basic',3],['Interview Excellence','Structured interview and evaluation techniques','Intermediate',3],['Recruitment Analytics','Time-to-hire, cost-per-hire, conversion and retention metrics','Intermediate',2]];for(const r of rows)await env.DB.prepare('INSERT INTO training_courses(id,title,description,level,duration_hours) VALUES(?,?,?,?,?)').bind(uid(),...r).run()}}
+async function seed(env){const a=await env.DB.prepare('SELECT id FROM users WHERE email=?').bind('admin@indo-talent.my.id').first();if(!a){const id=uid();await env.DB.prepare('INSERT INTO users(id,name,email,password_hash,role,company_name) VALUES(?,?,?,?,?,?)').bind(id,'Indo-Talent Admin','admin@indo-talent.my.id',await hash('Admin123!'),'admin','Indo-Talent').run();await env.DB.prepare('INSERT INTO profiles(user_id) VALUES(?)').bind(id).run()}await ensureV3(env)}
+async function api(req,env){await seed(env);const u=new URL(req.url),p=u.pathname.replace(/^\/api/,'')||'/';if(req.method==='OPTIONS')return new Response(null,{status:204});
+if(req.method==='GET'&&p==='/health')return json({success:true,service:'indo-talent-erp',version:'3.0'});
+if(req.method==='POST'&&p==='/auth/register'){const b=await req.json(),email=String(b.email||'').trim().toLowerCase(),pw=String(b.password||'');const role=['candidate','company'].includes(b.role)?b.role:'candidate';if(!b.name||!email||pw.length<8)return json({success:false,error:'Nama, email dan password minimal 8 karakter wajib diisi.'},400);if(await env.DB.prepare('SELECT id FROM users WHERE email=?').bind(email).first())return json({success:false,error:'Email sudah terdaftar.'},409);const id=uid();await env.DB.prepare('INSERT INTO users(id,name,email,password_hash,role,phone,company_name) VALUES(?,?,?,?,?,?,?)').bind(id,b.name,email,await hash(pw),role,b.phone||'',role==='company'?(b.company_name||b.name):'').run();await env.DB.prepare('INSERT INTO profiles(user_id) VALUES(?)').bind(id).run();return json({success:true})}
+if(req.method==='POST'&&p==='/auth/login'){const b=await req.json(),email=String(b.email||'').trim().toLowerCase(),u=await env.DB.prepare('SELECT * FROM users WHERE email=? AND is_active=1').bind(email).first();if(!u||await hash(String(b.password||''))!==u.password_hash)return json({success:false,error:'Email atau password salah.'},401);const token=uid()+'.'+uid();await env.DB.prepare('INSERT INTO sessions(token,user_id,expires_at) VALUES(?,?,?)').bind(token,u.id,Date.now()+604800000).run();return json({success:true,token,user:{id:u.id,name:u.name,email:u.email,role:u.role,company_name:u.company_name,phone:u.phone}})}
+if(req.method==='POST'&&p==='/auth/logout'){const t=req.headers.get('Authorization')?.replace(/^Bearer /,'');if(t)await env.DB.prepare('DELETE FROM sessions WHERE token=?').bind(t).run();return json({success:true})}
+if(req.method==='GET'&&p==='/jobs'){const r=await env.DB.prepare(`SELECT j.*,u.company_name FROM jobs j JOIN users u ON u.id=j.company_id WHERE j.status='published' ORDER BY j.created_at DESC`).all();return json({success:true,jobs:r.results||[]})}
+if(req.method==='GET'&&p.startsWith('/jobs/')){const id=p.split('/')[2];const r=await env.DB.prepare('SELECT j.*,u.company_name FROM jobs j JOIN users u ON u.id=j.company_id WHERE j.id=?').bind(id).first();return r?json({success:true,job:r}):json({success:false,error:'Job tidak ditemukan'},404)}
+if(req.method==='GET'&&p==='/me'){const g=await guard(req,env);if(g.error)return g.error;const pr=await env.DB.prepare('SELECT * FROM profiles WHERE user_id=?').bind(g.user.id).first();return json({success:true,user:g.user,profile:pr||{}})}
+if(req.method==='PUT'&&p==='/me'){const g=await guard(req,env);if(g.error)return g.error;const b=await req.json();await env.DB.prepare('UPDATE users SET name=?,phone=?,company_name=? WHERE id=?').bind(b.name||g.user.name,b.phone||'',b.company_name||g.user.company_name||'',g.user.id).run();await env.DB.prepare(`INSERT INTO profiles(user_id,headline,education,experience,skills,cv_url,website) VALUES(?,?,?,?,?,?,?) ON CONFLICT(user_id) DO UPDATE SET headline=excluded.headline,education=excluded.education,experience=excluded.experience,skills=excluded.skills,cv_url=excluded.cv_url,website=excluded.website`).bind(g.user.id,b.headline||'',b.education||'',b.experience||'',b.skills||'',b.cv_url||'',b.website||'').run();return json({success:true})}
+if(req.method==='POST'&&p.match(/^\/jobs\/[^/]+\/apply$/)){const g=await guard(req,env,['candidate']);if(g.error)return g.error;const jobId=p.split('/')[2],b=await req.json(),j=await env.DB.prepare("SELECT id,company_id,title FROM jobs WHERE id=? AND status='published'").bind(jobId).first();if(!j)return json({success:false,error:'Lowongan tidak ditemukan'},404);try{const id=uid();await env.DB.prepare('INSERT INTO applications(id,job_id,candidate_id,cover_letter) VALUES(?,?,?,?)').bind(id,jobId,g.user.id,b.cover_letter||'').run();await env.DB.prepare('INSERT INTO notifications(id,user_id,title,message) VALUES(?,?,?,?)').bind(uid(),j.company_id,'Lamaran baru',`${g.user.name} melamar ${j.title}`).run();return json({success:true})}catch{return json({success:false,error:'Anda sudah melamar lowongan ini.'},409)}}
+if(req.method==='GET'&&p==='/applications'){const g=await guard(req,env);if(g.error)return g.error;let r;if(g.user.role==='candidate')r=await env.DB.prepare(`SELECT a.*,j.title,j.location,u.company_name FROM applications a JOIN jobs j ON j.id=a.job_id JOIN users u ON u.id=j.company_id WHERE a.candidate_id=? ORDER BY a.created_at DESC`).bind(g.user.id).all();else if(g.user.role==='company')r=await env.DB.prepare(`SELECT a.*,j.title,j.location,c.name candidate_name,c.email candidate_email,u.company_name FROM applications a JOIN jobs j ON j.id=a.job_id JOIN users c ON c.id=a.candidate_id JOIN users u ON u.id=j.company_id WHERE j.company_id=? ORDER BY a.created_at DESC`).bind(g.user.id).all();else r=await env.DB.prepare(`SELECT a.*,j.title,j.location,c.name candidate_name,c.email candidate_email,u.company_name FROM applications a JOIN jobs j ON j.id=a.job_id JOIN users c ON c.id=a.candidate_id JOIN users u ON u.id=j.company_id ORDER BY a.created_at DESC`).all();return json({success:true,applications:r.results||[]})}
+if(req.method==='PUT'&&p.match(/^\/applications\/[^/]+$/)){const g=await guard(req,env,['company','admin']);if(g.error)return g.error;const id=p.split('/')[2],b=await req.json(),ok=['Applied','Screening','Shortlisted','Interview','Test','Offer','Hired','Rejected'];if(!ok.includes(b.status))return json({success:false,error:'Status tidak valid'},400);const a=await env.DB.prepare('SELECT a.id,j.company_id,a.candidate_id FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.id=?').bind(id).first();if(!a)return json({success:false,error:'Application tidak ditemukan'},404);if(g.user.role==='company'&&a.company_id!==g.user.id)return json({success:false,error:'Tidak berwenang'},403);await env.DB.prepare('UPDATE applications SET status=?,updated_at=CURRENT_TIMESTAMP WHERE id=?').bind(b.status,id).run();await env.DB.prepare('INSERT INTO notifications(id,user_id,title,message) VALUES(?,?,?,?)').bind(uid(),a.candidate_id,'Application update',`Status lamaran Anda berubah menjadi ${b.status}.`).run();return json({success:true})}
+if(req.method==='POST'&&p==='/jobs'){const g=await guard(req,env,['company','admin']);if(g.error)return g.error;const b=await req.json();if(!b.title)return json({success:false,error:'Judul lowongan wajib diisi'},400);const cid=g.user.role==='admin'?(b.company_id||g.user.id):g.user.id;const id=uid();await env.DB.prepare(`INSERT INTO jobs(id,company_id,title,location,employment_type,workplace_type,salary_min,salary_max,currency,description,requirements,benefits,status) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).bind(id,cid,b.title,b.location||'',b.employment_type||'Full Time',b.workplace_type||'On-site',Number(b.salary_min||0),Number(b.salary_max||0),'IDR',b.description||'',b.requirements||'',b.benefits||'','published').run();return json({success:true,id})}
+if(req.method==='GET'&&p==='/company/jobs'){const g=await guard(req,env,['company','admin']);if(g.error)return g.error;const r=g.user.role==='admin'?await env.DB.prepare('SELECT j.*,u.company_name FROM jobs j JOIN users u ON u.id=j.company_id ORDER BY j.created_at DESC').all():await env.DB.prepare('SELECT * FROM jobs WHERE company_id=? ORDER BY created_at DESC').bind(g.user.id).all();return json({success:true,jobs:r.results||[]})}
+if(req.method==='GET'&&p==='/candidates'){const g=await guard(req,env,['company','admin']);if(g.error)return g.error;const r=await env.DB.prepare(`SELECT u.id,u.name,u.email,u.phone,p.headline,p.skills,p.experience,(SELECT COUNT(*) FROM applications a WHERE a.candidate_id=u.id) application_count FROM users u LEFT JOIN profiles p ON p.user_id=u.id WHERE u.role='candidate' ORDER BY u.created_at DESC`).all();return json({success:true,candidates:r.results||[]})}
+if(req.method==='GET'&&p.startsWith('/candidates/')){const g=await guard(req,env,['company','admin']);if(g.error)return g.error;const id=p.split('/')[2],c=await env.DB.prepare(`SELECT u.*,p.headline,p.education,p.experience,p.skills,p.cv_url,p.website FROM users u LEFT JOIN profiles p ON p.user_id=u.id WHERE u.id=? AND u.role='candidate'`).bind(id).first();if(!c)return json({success:false,error:'Candidate tidak ditemukan'},404);const a=await env.DB.prepare(`SELECT a.*,j.title,u.company_name FROM applications a JOIN jobs j ON j.id=a.job_id JOIN users u ON u.id=j.company_id WHERE a.candidate_id=? ORDER BY a.created_at DESC`).bind(id).all();return json({success:true,candidate:c,applications:a.results||[]})}
+if(req.method==='GET'&&p==='/interviews'){const g=await guard(req,env);if(g.error)return g.error;let r;if(g.user.role==='candidate')r=await env.DB.prepare(`SELECT i.*,j.title,c.name candidate_name,c.email candidate_email FROM interviews i JOIN applications a ON a.id=i.application_id JOIN jobs j ON j.id=a.job_id JOIN users c ON c.id=a.candidate_id WHERE a.candidate_id=? ORDER BY i.scheduled_at`).bind(g.user.id).all();else if(g.user.role==='company')r=await env.DB.prepare(`SELECT i.*,j.title,c.name candidate_name,c.email candidate_email FROM interviews i JOIN applications a ON a.id=i.application_id JOIN jobs j ON j.id=a.job_id JOIN users c ON c.id=a.candidate_id WHERE j.company_id=? ORDER BY i.scheduled_at`).bind(g.user.id).all();else r=await env.DB.prepare(`SELECT i.*,j.title,c.name candidate_name,c.email candidate_email FROM interviews i JOIN applications a ON a.id=i.application_id JOIN jobs j ON j.id=a.job_id JOIN users c ON c.id=a.candidate_id ORDER BY i.scheduled_at`).all();return json({success:true,interviews:r.results||[]})}
+if(req.method==='GET'&&p==='/training'){const g=await guard(req,env);if(g.error)return g.error;const r=await env.DB.prepare(`SELECT c.*, (SELECT COUNT(*) FROM training_enrollments e WHERE e.course_id=c.id) enrolled_count, EXISTS(SELECT 1 FROM training_enrollments e WHERE e.course_id=c.id AND e.user_id=?) enrolled FROM training_courses c WHERE c.active=1 ORDER BY c.created_at`).bind(g.user.id).all();return json({success:true,courses:r.results||[]})}
+if(req.method==='POST'&&p.match(/^\/training\/[^/]+\/enroll$/)){const g=await guard(req,env);if(g.error)return g.error;const id=p.split('/')[2];try{await env.DB.prepare('INSERT INTO training_enrollments(id,course_id,user_id) VALUES(?,?,?)').bind(uid(),id,g.user.id).run();return json({success:true})}catch{return json({success:false,error:'Already enrolled'},409)}}
+if(req.method==='GET'&&p==='/admin/stats'){const g=await guard(req,env,['admin']);if(g.error)return g.error;const q=async s=>(await env.DB.prepare(s).first())?.c||0;return json({success:true,stats:{users:await q('SELECT COUNT(*) c FROM users'),companies:await q("SELECT COUNT(*) c FROM users WHERE role='company'"),candidates:await q("SELECT COUNT(*) c FROM users WHERE role='candidate'"),jobs:await q('SELECT COUNT(*) c FROM jobs'),applications:await q('SELECT COUNT(*) c FROM applications'),hired:await q("SELECT COUNT(*) c FROM applications WHERE status='Hired'")}})}
+return json({success:false,error:'Endpoint tidak ditemukan'},404)}
+export default {async fetch(req,env){try{const u=new URL(req.url);const r=u.pathname.startsWith('/api/')?await api(req,env):await env.ASSETS.fetch(req);return cors(r)}catch(e){return cors(json({success:false,error:'Server error',detail:String(e)},500))}}};
