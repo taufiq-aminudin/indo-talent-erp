@@ -456,7 +456,39 @@ app.get("/", (c) => c.html(`<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${c.env.APP_NAME}</title>
 <style>
 :root{font-family:Inter,system-ui,-apple-system,sans-serif;color:#10213b;background:#f6f8fb}body{margin:0}header{background:#fff;border-bottom:1px solid #e5eaf2;padding:18px 28px;display:flex;justify-content:space-between;align-items:center}main{max-width:1180px;margin:28px auto;padding:0 20px}.brand{display:flex;align-items:center;gap:12px;font-weight:800;font-size:22px}.brand img{width:42px;height:42px;object-fit:contain}.muted{color:#667085}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.card{background:#fff;border:1px solid #e4e9f1;border-radius:16px;padding:20px;box-shadow:0 3px 14px #132b4a0a;margin-bottom:18px}.metric b{font-size:30px;display:block;margin-top:8px}.tabs{display:flex;gap:8px;margin:18px 0}.tabs button,.btn{border:0;border-radius:10px;padding:10px 14px;background:#0b66ff;color:white;cursor:pointer}.tabs button.secondary,.btn.secondary{background:#edf2f8;color:#20304a}.hidden{display:none}.auth{max-width:480px;margin:60px auto}.input{width:100%;box-sizing:border-box;padding:12px;border:1px solid #d7deea;border-radius:10px;margin:6px 0 12px}.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}.table{width:100%;border-collapse:collapse}.table th,.table td{text-align:left;padding:11px;border-bottom:1px solid #edf0f5}.pill{display:inline-block;padding:4px 8px;border-radius:999px;background:#edf4ff}.danger{color:#b42318}.logo{max-width:58px;max-height:58px}@media(max-width:800px){.grid,.row{grid-template-columns:1fr}.grid{grid-template-columns:1fr 1fr}}
-.upload-options{display:grid;grid-template-columns:1fr 1fr;gap:12px;width:100%}.upload-option{border:1px solid #d7deea;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:8px;font-weight:600}.upload-option input{width:100%}@media(max-width:700px){.upload-options{grid-template-columns:1fr}}</style></head><body>
+.upload-options{display:grid;grid-template-columns:1fr 1fr;gap:12px;width:100%}.upload-option{border:1px solid #d7deea;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:8px;font-weight:600}.upload-option input{width:100%}@media(max-width:700px){.upload-options{grid-template-columns:1fr}}
+.screen-result-card{border:1px solid #dbe3ef;border-radius:16px;background:#fff;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,.06)}
+.screen-result-top{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:22px 24px;border-bottom:1px solid #e7edf5}
+.screen-eyebrow{font-size:11px;font-weight:700;letter-spacing:.12em;color:#64748b;margin-bottom:5px}
+.screen-result-title{font-size:20px;font-weight:750;color:#0f172a}
+.screen-score{min-width:100px;text-align:center;padding:10px 14px;border-radius:14px}
+.screen-score-number{font-size:30px;font-weight:800;line-height:1}
+.screen-score-label{font-size:12px;color:#64748b;margin-left:3px}
+.score-strong{background:#ecfdf3;color:#047857}.score-good{background:#eff6ff;color:#1d4ed8}.score-review{background:#fff7ed;color:#c2410c}.score-low{background:#fef2f2;color:#b91c1c}.score-na{background:#f1f5f9;color:#64748b}
+.screen-status-row{padding:14px 24px 0}
+.screen-status{display:inline-flex;padding:6px 11px;border-radius:999px;font-size:12px;font-weight:700}
+.status-strong{background:#dcfce7;color:#166534}.status-potential{background:#dbeafe;color:#1d4ed8}.status-low{background:#fee2e2;color:#b91c1c}.status-review{background:#f1f5f9;color:#475569}
+.screen-section{padding:20px 24px 0}
+.screen-section-title{font-size:13px;font-weight:750;color:#334155;margin-bottom:9px}
+.screen-summary{font-size:14px;line-height:1.65;color:#475569}
+.screen-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:20px 24px 0}
+.screen-panel{border:1px solid #e2e8f0;border-radius:12px;padding:16px;background:#f8fafc}
+.screen-list{margin:0;padding-left:20px;color:#475569;font-size:13px;line-height:1.7}
+.screen-empty{font-size:13px;color:#94a3b8}
+.skill-wrap{display:flex;flex-wrap:wrap;gap:7px}
+.skill-chip{display:inline-flex;padding:6px 9px;border-radius:8px;font-size:12px;font-weight:600}
+.skill-match{background:#ecfdf5;color:#047857}.skill-missing{background:#fff1f2;color:#be123c}
+.screen-meta{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
+.screen-meta>div{border:1px solid #e2e8f0;border-radius:10px;padding:11px 12px;background:#f8fafc}
+.screen-meta span{display:block;font-size:11px;color:#64748b;margin-bottom:4px}
+.screen-meta strong{display:block;font-size:13px;color:#0f172a}
+.screen-recommendation{margin:20px 24px 24px;padding:15px 16px;border-left:4px solid #2563eb;background:#eff6ff;border-radius:10px;color:#334155;font-size:14px;line-height:1.6}
+.screen-error{padding:20px 22px;border:1px solid #fecaca;background:#fff7f7;border-radius:12px}
+.screen-error-title{font-size:16px;font-weight:750;color:#991b1b;margin-bottom:6px}
+.screen-error-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#b91c1c;margin-bottom:7px}
+.screen-error-detail{font-size:13px;line-height:1.6;color:#64748b;white-space:pre-wrap}
+@media(max-width:700px){.screen-result-top{align-items:flex-start;flex-direction:column}.screen-grid,.screen-meta{grid-template-columns:1fr}}
+</style></head><body>
 <div id="auth" class="auth card"><div class="brand"><img src="/logo.png" onerror="this.style.display='none'"><span>${c.env.APP_NAME}</span></div><h2 id="authTitle">Sign in</h2><p class="muted">Secure recruiter workspace with tenant isolation.</p><form id="authForm"><div id="orgField" class="hidden"><label>Organization</label><input class="input" id="org" autocomplete="organization"></div><label>Name</label><input class="input" id="name" autocomplete="name"><label>Email</label><input class="input" id="email" type="email" autocomplete="email" required><label>Password</label><input class="input" id="password" type="password" minlength="10" autocomplete="current-password" required><button class="btn" id="authBtn">Sign in</button></form><p><button class="btn secondary" id="toggleAuth">Create an organization</button></p><div id="authMsg" class="muted"></div></div>
 <div id="app" class="hidden"><header><div class="brand"><img src="/logo.png" onerror="this.style.display='none'"><span>${c.env.APP_NAME}</span></div><div><span id="who" class="muted"></span> <button class="btn secondary" id="logout">Logout</button></div></header><main><div class="tabs"><button data-tab="overview">Overview</button><button class="secondary" data-tab="jobs">Jobs</button><button class="secondary" data-tab="candidates">Candidates</button><button class="secondary" data-tab="applications">Screening</button></div>
 <section id="overview" class="tab"><div class="grid"><div class="card metric">Jobs<b id="mJobs">0</b></div><div class="card metric">Candidates<b id="mCandidates">0</b></div><div class="card metric">Applications<b id="mApplications">0</b></div><div class="card metric">Strong matches<b id="mStrong">0</b></div></div><div class="card"><h2>AI Screening</h2><p class="muted">Create jobs, upload CVs, attach candidates to jobs, then run rule-based or AI screening.</p></div></section>
@@ -486,6 +518,67 @@ async function loadApps(){
     $('#appsBody').innerHTML='<tr><td colspan="5">Screening load failed: '+esc(e.message)+'</td></tr>';
   }
 }
+
+function resultEsc(v){
+  return esc(v==null?"":String(v));
+}
+function resultList(v){
+  let a=v;
+  if(typeof a==="string"){
+    try{a=JSON.parse(a)}catch{a=a.split(/\n|,/).map(x=>x.trim()).filter(Boolean)}
+  }
+  return Array.isArray(a)?a.filter(Boolean):[];
+}
+function renderScreeningResult(data){
+  const box=$('#result');
+  const out=$('#resultText');
+  box.classList.remove('hidden');
+
+  if(data && data.error){
+    const detail=data.detail||data.message||data.error;
+    out.innerHTML='<div class="screen-error"><div class="screen-error-title">Screening could not be completed</div><div class="screen-error-code">'+resultEsc(data.error)+'</div><div class="screen-error-detail">'+resultEsc(detail)+'</div></div>';
+    return;
+  }
+
+  const score=Number(data?.overall_score ?? data?.ai_score);
+  const hasScore=Number.isFinite(score);
+  const status=String(data?.status||data?.ai_recommendation||"Review");
+  const summary=String(data?.summary||data?.ai_summary||"");
+  const strengths=resultList(data?.strengths||data?.ai_strengths);
+  const gaps=resultList(data?.gaps||data?.weaknesses||data?.ai_weaknesses);
+  const matched=resultList(data?.matched_skills||data?.ai_matched_skills);
+  const missing=resultList(data?.missing_skills||data?.ai_missing_skills);
+  const education=String(data?.education||"");
+  const position=String(data?.current_position||"");
+  const experience=data?.experience_years;
+  const recommendation=String(data?.recommendation||data?.ai_recommendation||"");
+
+  const scoreClass=!hasScore?"score-na":score>=85?"score-strong":score>=70?"score-good":score>=50?"score-review":"score-low";
+  const statusClass=/strong/i.test(status)?"status-strong":/potential/i.test(status)?"status-potential":/low/i.test(status)?"status-low":"status-review";
+
+  const listHtml=(items,empty)=>{
+    if(!items.length)return '<div class="screen-empty">'+resultEsc(empty)+'</div>';
+    return '<ul class="screen-list">'+items.map(x=>'<li>'+resultEsc(x)+'</li>').join('')+'</ul>';
+  };
+
+  out.innerHTML=
+    '<div class="screen-result-card">'+
+      '<div class="screen-result-top">'+
+        '<div><div class="screen-eyebrow">AI SCREENING RESULT</div><div class="screen-result-title">Candidate assessment</div></div>'+
+        '<div class="screen-score '+scoreClass+'"><span class="screen-score-number">'+(hasScore?resultEsc(score):'—')+'</span><span class="screen-score-label">/ 100</span></div>'+
+      '</div>'+
+      '<div class="screen-status-row"><span class="screen-status '+statusClass+'">'+resultEsc(status)+'</span></div>'+
+      (summary?'<div class="screen-section"><div class="screen-section-title">Assessment Summary</div><div class="screen-summary">'+resultEsc(summary)+'</div></div>':'')+
+      '<div class="screen-grid">'+
+        '<div class="screen-panel"><div class="screen-section-title">Strengths</div>'+listHtml(strengths,'No strengths identified yet.')+'</div>'+
+        '<div class="screen-panel"><div class="screen-section-title">Areas to Review</div>'+listHtml(gaps.length?gaps:missing,'No gaps identified yet.')+'</div>'+
+      '</div>'+
+      ((matched.length||missing.length)?'<div class="screen-section"><div class="screen-section-title">Skills Match</div><div class="skill-wrap">'+matched.map(x=>'<span class="skill-chip skill-match">✓ '+resultEsc(x)+'</span>').join('')+missing.map(x=>'<span class="skill-chip skill-missing">× '+resultEsc(x)+'</span>').join('')+'</div></div>':'')+
+      ((education||position||experience!=null)?'<div class="screen-section"><div class="screen-section-title">Profile Snapshot</div><div class="screen-meta">'+(position?'<div><span>Current Position</span><strong>'+resultEsc(position)+'</strong></div>':'')+(experience!=null?'<div><span>Experience</span><strong>'+resultEsc(experience)+' years</strong></div>':'')+(education?'<div><span>Education</span><strong>'+resultEsc(education)+'</strong></div>':'')+'</div></div>':'')+
+      (recommendation?'<div class="screen-recommendation"><div class="screen-section-title">Recommendation</div><div>'+resultEsc(recommendation)+'</div></div>':'')+
+    '</div>';
+}
+
 async function extractCv(id){
   if(window.extractingCv)return;
   window.extractingCv=true;
@@ -499,7 +592,7 @@ async function extractCv(id){
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({application_id:id})
     });
-    out.textContent=JSON.stringify(r.extraction||r,null,2);
+    renderScreeningResult(r.extraction||r);
     await refresh();
     await loadApps();
   }catch(e){
