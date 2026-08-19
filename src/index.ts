@@ -178,8 +178,77 @@ app.post("/api/jobs",async c=>{
     return c.json({error:"job_create_failed",detail:String(e?.message||e)},500);
   }
 });
-app.get("/api/candidates",async c=>{const u=c.get("user") as AuthUser;return c.json((await c.env.DB.prepare(`SELECT u.id,u.name,u.email,u.phone,cp.cv_url,cp.full_name,cp.headline,cp.summary FROM users u LEFT JOIN candidate_profiles cp ON cp.user_id=u.id WHERE u.company_id=? AND u.role='candidate' ORDER BY u.created_at DESC`).bind(u.company_id).all()).results)});
-app.post("/api/candidates/upload",async c=>{try{const u=c.get("user") as AuthUser,f=await c.req.formData(),file=f.get("file"),name=String(f.get("name")||"").trim(),email0=String(f.get("email")||"").trim().toLowerCase(),phone=String(f.get("phone")||"").trim(),jobId=String(f.get("job_id")||"").trim();if(!(file instanceof File)||!name)return c.json({error:"file,name_required"},400);if(file.size>10*1024*1024)return c.json({error:"file_too_large_max_10mb"},413);const email=email0||`candidate-${crypto.randomUUID()}@internal.invalid`;if(await c.env.DB.prepare("SELECT id FROM users WHERE email=? LIMIT 1").bind(email).first())return c.json({error:"candidate_email_already_exists"},409);const uid=id(),key=`${u.company_id}/candidates/${uid}/${file.name.replace(/[^a-zA-Z0-9._-]+/g,"_").slice(0,160)||"cv"}`;await c.env.CV_BUCKET.put(key,file.stream(),{httpMetadata:{contentType:file.type||"application/octet-stream"}});const text=file.type==="text/plain"?(await file.text()).slice(0,100000):"";await c.env.DB.batch([c.env.DB.prepare("INSERT INTO users(id,role,email,password_hash,name,phone,status,company_id,approval_status) VALUES(?,?,?,?,?,?,?,?,?)").bind(uid,"candidate",email,"!cv-upload-no-login!",name,phone,"active",u.company_id,"approved"),c.env.DB.prepare("INSERT INTO candidate_profiles(user_id,phone,full_name,cv_url,summary) VALUES(?,?,?,?,?)").bind(uid,phone,name,key,text)]);if(jobId){const j=await c.env.DB.prepare("SELECT id FROM jobs WHERE id=? AND company_id=?").bind(jobId,u.company_id).first();if(j)await createApplication(c,u,jobId,uid)}await audit(c,u,"candidate.upload",uid);return c.json({id:uid,object_key:key,filename:file.name,extraction_status:file.type==="text/plain"?"complete":"pending"},201)}catch(e:any){return c.json({error:"candidate_upload_failed",detail:String(e?.message||e)},500)}});
+app.get("/api/candidates",async c=>{
+  try{
+    const u=await currentUser(c);
+    if(!u)return c.json({error:"unauthorized"},401);
+    const rows=await c.env.DB.prepare(
+      "SELECT cu.id,cpu.cv_url,cpu.full_name,cpu.headline,cpu.summary," +
+      "a.id application_id,a.job_id,j.title job_title,a.status,a.score " +
+      "FROM users cu " +
+      "LEFT JOIN candidate_profiles cpu ON cpu.user_id=cu.id " +
+      "LEFT JOIN applications a ON a.candidate_id=cu.id " +
+      "LEFT JOIN jobs j ON j.id=a.job_id " +
+      "WHERE cu.company_id=? AND cu.role='candidate' " +
+      "ORDER BY cu.created_at DESC"
+    ).bind(u.company_id).all();
+    return c.json(rows.results||[]);
+  }catch(e:any){
+    return c.json({error:"candidates_query_failed",detail:String(e?.message||e)},500);
+  }
+});
+app.post("/api/candidates/upload",async c=>{
+  try{
+    const u=await currentUser(c);
+    if(!u)return c.json({error:"unauthorized",stage:"candidate_upload_auth"},401);
+    if(!u.company_id)return c.json({error:"company_context_missing"},400);
+    if(u.role!=="company"&&u.role!=="admin")return c.json({error:"company_role_required"},403);
+
+    const f=await c.req.formData();
+    const file=f.get("file");
+    const jobId=String(f.get("job_id")||"").trim();
+
+    if(!(file instanceof File)||file.size===0)return c.json({error:"cv_file_required"},400);
+    if(!jobId)return c.json({error:"job_required"},400);
+    if(file.size>10*1024*1024)return c.json({error:"file_too_large_max_10mb"},413);
+
+    const job=await c.env.DB.prepare(
+      "SELECT id,title FROM jobs WHERE id=? AND company_id=? AND status='open' LIMIT 1"
+    ).bind(jobId,u.company_id).first<any>();
+    if(!job)return c.json({error:"job_not_found_or_closed"},404);
+
+    const uid=id();
+    const baseName=file.name.replace(/\.[^.]+$/,"").replace(/[_-]+/g," ").replace(/\s+/g," ").trim();
+    const candidateName=(baseName||"CV Candidate").slice(0,160);
+    const email=`cv-${uid}@internal.invalid`;
+    const key=`${u.company_id}/candidates/${uid}/${file.name.replace(/[^a-zA-Z0-9._-]+/g,"_").slice(0,160)||"cv"}`;
+
+    await c.env.CV_BUCKET.put(key,file.stream(),{
+      httpMetadata:{contentType:file.type||"application/octet-stream"}
+    });
+
+    const textContent=file.type==="text/plain"?(await file.text()).slice(0,100000):"";
+
+    await c.env.DB.batch([
+      c.env.DB.prepare(
+        "INSERT INTO users(id,role,email,password_hash,name,phone,status,company_id,approval_status) VALUES(?,?,?,?,?,?,?,?,?)"
+      ).bind(uid,"candidate",email,"!cv-upload-no-login!",candidateName,null,"active",u.company_id,"approved"),
+      c.env.DB.prepare(
+        "INSERT INTO candidate_profiles(user_id,phone,full_name,cv_url,summary) VALUES(?,?,?,?,?)"
+      ).bind(uid,null,candidateName,key,textContent)
+    ]);
+
+    await createApplication(c,u,jobId,uid);
+    await audit(c,u,"candidate.upload",uid);
+
+    return c.json({
+      id:uid,object_key:key,filename:file.name,job_id:job.id,job_title:job.title,
+      extraction_status:file.type==="text/plain"?"complete":"pending"
+    },201);
+  }catch(e:any){
+    return c.json({error:"candidate_upload_failed",detail:String(e?.message||e)},500);
+  }
+});
 app.get("/api/applications",async c=>{try{const u=c.get("user") as AuthUser,m=await appMeta(c.env.DB);if(!m.candidate)return c.json({error:"applications_missing_candidate_key"},500);const tenant=m.tenant?`AND a.${m.tenant}=?`:"";const sql=`SELECT a.id,a.status,a.score,j.id job_id,j.title job_title,cu.id candidate_id,cu.name candidate_name,cu.email candidate_email,cp.cv_url FROM applications a JOIN jobs j ON j.id=a.job_id JOIN users cu ON cu.id=a.${m.candidate} LEFT JOIN candidate_profiles cp ON cp.user_id=cu.id WHERE j.company_id=? ${tenant} ORDER BY a.rowid DESC`;const params=m.tenant?[u.company_id,u.company_id]:[u.company_id];return c.json((await c.env.DB.prepare(sql).bind(...params).all()).results)}catch(e:any){return c.json({error:"applications_query_failed",detail:String(e?.message||e)},500)}});
 app.post("/api/screenings/rule",async c=>{try{const u=c.get("user") as AuthUser,b=await c.req.json<any>(),m=await appMeta(c.env.DB);if(!m.candidate)return c.json({error:"applications_missing_candidate_key"},500);const r=await c.env.DB.prepare(`SELECT a.id,j.title,j.description,cu.name,cp.skills,cp.experience_years,cp.summary FROM applications a JOIN jobs j ON j.id=a.job_id JOIN users cu ON cu.id=a.${m.candidate} LEFT JOIN candidate_profiles cp ON cp.user_id=cu.id WHERE a.id=? AND j.company_id=? LIMIT 1`).bind(b.application_id,u.company_id).first<any>();if(!r)return c.json({error:"application_not_found"},404);let skills:string[]=[];if(r.skills){try{skills=JSON.parse(r.skills)}catch{skills=String(r.skills).split(/[,|]/).map((x:string)=>x.trim()).filter(Boolean)}}const text=String(r.summary||"").toLowerCase(),hits=skills.filter(s=>text.includes(s.toLowerCase()));const score=skills.length?Math.round(hits.length/skills.length*100):(Number(r.experience_years||0)>0?70:50),status=score>=85?"Strong Match":score>=70?"Potential Match":"Low Match";if(m.cs.has("score"))await c.env.DB.prepare("UPDATE applications SET score=? WHERE id=?").bind(score,b.application_id).run();if(m.cs.has("status"))await c.env.DB.prepare("UPDATE applications SET status=? WHERE id=?").bind(status,b.application_id).run();await audit(c,u,"screening.rule",b.application_id);return c.json({overall_score:score,status,matched_skills:hits,missing_skills:skills.filter(s=>!hits.includes(s)),note:"Rule-based screening; recruiter makes the final decision."})}catch(e:any){return c.json({error:"rule_screen_failed",detail:String(e?.message||e)},500)}});
 app.post("/api/ai/screen",async c=>{try{const u=c.get("user") as AuthUser;if(!c.env.OPENAI_API_KEY)return c.json({error:"ai_not_configured",message:"Set OPENAI_API_KEY as a Worker secret."},503);const b=await c.req.json<any>(),m=await appMeta(c.env.DB);if(!m.candidate)return c.json({error:"applications_missing_candidate_key"},500);const r=await c.env.DB.prepare(`SELECT a.id,j.title,j.description,cu.name,cp.summary,cp.skills,cp.experience_years FROM applications a JOIN jobs j ON j.id=a.job_id JOIN users cu ON cu.id=a.${m.candidate} LEFT JOIN candidate_profiles cp ON cp.user_id=cu.id WHERE a.id=? AND j.company_id=? LIMIT 1`).bind(b.application_id,u.company_id).first<any>();if(!r)return c.json({error:"application_not_found"},404);const schema={type:"object",additionalProperties:false,properties:{overall_score:{type:"integer",minimum:0,maximum:100},summary:{type:"string"},strengths:{type:"array",items:{type:"string"}},gaps:{type:"array",items:{type:"string"}},recommendation:{type:"string"},interview_questions:{type:"array",items:{type:"string"}}},required:["overall_score","summary","strengths","gaps","recommendation","interview_questions"]};const resp=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${c.env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:c.env.OPENAI_MODEL||"gpt-5.6",store:false,instructions:"Assess job fit only from job-relevant evidence. Never infer protected traits. Return structured JSON only.",input:`JOB: ${r.title}\nDESCRIPTION: ${String(r.description).slice(0,14000)}\nCANDIDATE: ${r.name}\nPROFILE: SUMMARY=${r.summary||""}\nSKILLS=${r.skills||""}\nEXPERIENCE_YEARS=${r.experience_years||0}`,text:{format:{type:"json_schema",name:"candidate_screening",strict:true,schema}}})});if(!resp.ok)return c.json({error:"ai_request_failed",status:resp.status},502);const d=await resp.json() as any,content=d?.output?.flatMap((x:any)=>x?.content||[]).find((x:any)=>x?.type==="output_text")?.text;if(!content)return c.json({error:"empty_ai_response"},502);let result:any;try{result=JSON.parse(content)}catch{return c.json({error:"invalid_ai_json"},502)};result.status=result.overall_score>=85?"Strong Match":result.overall_score>=70?"Potential Match":"Low Match";if(m.cs.has("score"))await c.env.DB.prepare("UPDATE applications SET score=? WHERE id=?").bind(result.overall_score,b.application_id).run();if(m.cs.has("status"))await c.env.DB.prepare("UPDATE applications SET status=? WHERE id=?").bind(result.status,b.application_id).run();await audit(c,u,"screening.ai",b.application_id);return c.json(result)}catch(e:any){return c.json({error:"ai_screen_failed",detail:String(e?.message||e)},500)}});
@@ -192,7 +261,7 @@ app.get("/", (c) => c.html(`<!doctype html>
 <div id="app" class="hidden"><header><div class="brand"><img src="/logo.png" onerror="this.style.display='none'"><span>${c.env.APP_NAME}</span></div><div><span id="who" class="muted"></span> <button class="btn secondary" id="logout">Logout</button></div></header><main><div class="tabs"><button data-tab="overview">Overview</button><button class="secondary" data-tab="jobs">Jobs</button><button class="secondary" data-tab="candidates">Candidates</button><button class="secondary" data-tab="applications">Screening</button></div>
 <section id="overview" class="tab"><div class="grid"><div class="card metric">Jobs<b id="mJobs">0</b></div><div class="card metric">Candidates<b id="mCandidates">0</b></div><div class="card metric">Applications<b id="mApplications">0</b></div><div class="card metric">Strong matches<b id="mStrong">0</b></div></div><div class="card"><h2>AI Screening</h2><p class="muted">Create jobs, upload CVs, attach candidates to jobs, then run rule-based or AI screening.</p></div></section>
 <section id="jobs" class="tab hidden"><div class="card"><h2>Create job</h2><form id="jobForm"><div class="row"><input class="input" id="jobTitle" placeholder="Job title" required><input class="input" id="jobLocation" placeholder="Location"></div><textarea class="input" id="jobDescription" rows="6" placeholder="Job description" required></textarea><input class="input" id="jobSkills" placeholder="Skills, comma separated"><button class="btn" type="submit">Create job</button><p id="jobMsg" class="muted"></p></form></div><div class="card"><h2>Jobs</h2><table class="table"><thead><tr><th>Title</th><th>Location</th><th>Created</th></tr></thead><tbody id="jobsBody"></tbody></table></div></section>
-<section id="candidates" class="tab hidden"><div class="card"><h2>Upload CV</h2><form id="candidateForm"><div class="row"><input class="input" id="candidateName" placeholder="Candidate name" required><input class="input" id="candidateEmail" placeholder="Email"></div><div class="row"><input class="input" id="candidatePhone" placeholder="Phone"><select class="input" id="candidateJob"><option value="">Attach to job (optional)</option></select></div><input class="input" id="candidateFile" type="file" accept=".pdf,.docx,.txt" required><button class="btn">Upload candidate</button><p id="candidateMsg" class="muted"></p></form></div><div class="card"><h2>Candidates</h2><table class="table"><thead><tr><th>Name</th><th>Email</th><th>CV</th></tr></thead><tbody id="candidatesBody"></tbody></table></div></section>
+<section id="candidates" class="tab hidden"><div class="card"><h2>Upload CV</h2><p class="muted">Untuk screening, cukup pilih posisi dan upload CV. Nama, email, dan nomor HP tidak diperlukan.</p><form id="candidateForm"><div class="row"><select class="input" id="candidateJob" required><option value="">Select job position</option></select><input class="input" id="candidateFile" type="file" accept=".pdf,.docx,.txt" required></div><button class="btn">Upload CV</button><p id="candidateMsg" class="muted"></p></form></div><div class="card"><h2>Candidate Screening Pool</h2><table class="table"><thead><tr><th>CV</th><th>Job</th><th>Score</th><th>Status</th></tr></thead><tbody id="candidatesBody"></tbody></table></div></section>
 <section id="applications" class="tab hidden"><div class="card"><h2>Screening pipeline</h2><table class="table"><thead><tr><th>Candidate</th><th>Job</th><th>Score</th><th>Status</th><th>Actions</th></tr></thead><tbody id="appsBody"></tbody></table></div><div id="result" class="card hidden"><h2>Screening result</h2><pre id="resultText" style="white-space:pre-wrap"></pre></div></section>
 </main></div>
 <script>
@@ -205,7 +274,7 @@ $('#authForm').onsubmit=async e=>{e.preventDefault();$('#authMsg').textContent='
 $('#logout').onclick=async()=>{await api('/api/auth/logout',{method:'POST'});location.reload()};
 $$('.tabs button').forEach(b=>b.onclick=()=>{$$('.tabs button').forEach(x=>x.classList.add('secondary'));b.classList.remove('secondary');$$('.tab').forEach(x=>x.classList.add('hidden'));$('#'+b.dataset.tab).classList.remove('hidden');if(b.dataset.tab==='jobs')loadJobs();if(b.dataset.tab==='candidates')loadCandidates();if(b.dataset.tab==='applications')loadApps()});
 async function loadJobs(){const jobs=await api('/api/jobs');$('#jobsBody').innerHTML=jobs.map(j=>\`<tr><td>\${esc(j.title)}</td><td>\${esc(j.location||'-')}</td><td>\${new Date(j.created_at).toLocaleString()}</td></tr>\`).join('');$('#candidateJob').innerHTML='<option value="">Attach to job (optional)</option>'+jobs.map(j=>\`<option value="\${j.id}">\${esc(j.title)}</option>\`).join('')}
-async function loadCandidates(){const rows=await api('/api/candidates');$('#candidatesBody').innerHTML=rows.map(x=>\`<tr><td>\${esc(x.name)}</td><td>\${esc(x.email||'-')}</td><td>\${esc(x.cv_filename||'-')}</td></tr>\`).join('')}
+async function loadCandidates(){const rows=await api('/api/candidates');$('#candidatesBody').innerHTML=rows.map(x=>`<tr><td>${esc(x.cv_url||x.full_name||'-')}</td><td>${esc(x.job_title||'-')}</td><td>${x.score==null?'-':x.score}</td><td><span class="pill">${esc(x.status||'Uploaded')}</span></td></tr>`).join('')}
 async function loadApps(){const rows=await api('/api/applications');$('#appsBody').innerHTML=rows.map(x=>\`<tr><td>\${esc(x.candidate_name)}</td><td>\${esc(x.job_title)}</td><td>\${x.score||0}</td><td><span class="pill">\${esc(x.status)}</span></td><td><button class="btn secondary" onclick="rule('\${x.id}')">Rule</button> <button class="btn" onclick="ai('\${x.id}')">AI</button></td></tr>\`).join('')}
 async function refresh(){const d=await api('/api/dashboard');$('#mJobs').textContent=d.jobs;$('#mCandidates').textContent=d.candidates;$('#mApplications').textContent=d.applications;$('#mStrong').textContent=d.strong_matches;await loadJobs()}
 $('#jobForm').onsubmit=async e=>{
@@ -226,7 +295,7 @@ $('#jobForm').onsubmit=async e=>{
     msg.textContent='Create job failed: '+err.message;
   }
 }
-$('#candidateForm').onsubmit=async e=>{e.preventDefault();const fd=new FormData();fd.append('name',$('#candidateName').value);fd.append('email',$('#candidateEmail').value);fd.append('phone',$('#candidatePhone').value);fd.append('job_id',$('#candidateJob').value);fd.append('file',$('#candidateFile').files[0]);$('#candidateMsg').textContent='Uploading...';try{const r=await api('/api/candidates/upload',{method:'POST',body:fd});$('#candidateMsg').textContent=r.extraction_status==='pending'?'Uploaded. PDF/DOCX text extraction is the next module.':'Uploaded and text indexed.';e.target.reset();await refresh();loadCandidates()}catch(err){$('#candidateMsg').textContent=err.message}}
+$('#candidateForm').onsubmit=async e=>{e.preventDefault();const fd=new FormData();fd.append('job_id',$('#candidateJob').value);fd.append('file',$('#candidateFile').files[0]);$('#candidateMsg').textContent='Uploading CV...';try{const r=await api('/api/candidates/upload',{method:'POST',body:fd});$('#candidateMsg').textContent=r.extraction_status==='pending'?'CV uploaded. PDF/DOCX extraction is pending.':'CV uploaded and indexed.';e.target.reset();await refresh();loadCandidates()}catch(err){$('#candidateMsg').textContent=err.message}}
 window.rule=async id=>{try{const r=await api('/api/screenings/rule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({application_id:id})});showResult(r);await refresh();loadApps()}catch(e){showResult({error:e.message})}}
 window.ai=async id=>{try{const r=await api('/api/ai/screen',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({application_id:id})});showResult(r);await refresh();loadApps()}catch(e){showResult({error:e.message})}}
 function showResult(x){$('#result').classList.remove('hidden');$('#resultText').textContent=JSON.stringify(x,null,2)}
