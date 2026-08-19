@@ -514,7 +514,48 @@ app.get("/", (c) => c.html(`<!doctype html>
 <section id="overview" class="tab"><div class="grid"><div class="card metric">Jobs<b id="mJobs">0</b></div><div class="card metric">Candidates<b id="mCandidates">0</b></div><div class="card metric">Applications<b id="mApplications">0</b></div><div class="card metric">Strong matches<b id="mStrong">0</b></div></div><div class="card"><h2>AI Screening</h2><p class="muted">Create jobs, upload CVs, attach candidates to jobs, then run rule-based or AI screening.</p></div></section>
 <section id="jobs" class="tab hidden"><div class="card"><h2>Create job</h2><form id="jobForm"><div class="row"><input class="input" id="jobTitle" placeholder="Job title" required><input class="input" id="jobLocation" placeholder="Location"></div><textarea class="input" id="jobDescription" rows="6" placeholder="Job description" required></textarea><input class="input" id="jobSkills" placeholder="Skills, comma separated"><button class="btn" type="submit">Create job</button><p id="jobMsg" class="muted"></p></form></div><div class="card"><h2>Jobs</h2><table class="table"><thead><tr><th>Title</th><th>Location</th><th>Created</th></tr></thead><tbody id="jobsBody"></tbody></table></div></section>
 <section id="candidates" class="tab hidden"><div class="card"><h2>Upload CV</h2><p class="muted">Pilih satu atau banyak CV, atau satu folder. CV diproses satu per satu agar upload banyak file tidak macet. Nama, email, dan nomor HP tidak diperlukan.</p><form id="candidateForm"><div class="row"><select class="input" id="candidateJob" required><option value="">Select job position</option></select><div class="upload-options"><label class="upload-option"><span>📄 Upload file(s)</span><input class="input" id="candidateFiles" type="file" accept=".pdf,.docx,.txt" multiple></label><label class="upload-option"><span>📁 Upload folder</span><input class="input" id="candidateFolder" type="file" accept=".pdf,.docx,.txt" multiple webkitdirectory directory></label></div></div><button class="btn">Upload CVs</button><p id="candidateMsg" class="muted"></p></form></div><div class="card"><h2>Candidate Screening Pool</h2><table class="table"><thead><tr><th>CV</th><th>Job</th><th>Score</th><th>Status</th></tr></thead><tbody id="candidatesBody"></tbody></table></div></section>
-<section id="applications" class="tab hidden"><div class="card"><h2>Screening pipeline</h2><table class="table"><thead><tr><th>Candidate</th><th>Job</th><th>Score</th><th>Status</th><th>Actions</th></tr></thead><tbody id="appsBody"></tbody></table></div><div id="result" class="card hidden"><h2>Screening result</h2><pre id="resultText" style="white-space:pre-wrap"></pre></div></section>
+<section id="applications" class="tab hidden"><div class="card"><h2>Screening pipeline</h2><table class="table"><thead><tr><th>Candidate</th><th>Job</th><th>Score</th><th>Status</th><th>Actions</th></tr></thead><tbody id="appsBody"></tbody></table></div><div id="result" class="card hidden">
+<style>
+.ai-result-card{border:1px solid #dbe4f0;border-radius:18px;background:#fff;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,.06)}
+.ai-result-head{padding:22px 24px;border-bottom:1px solid #e8edf5;display:flex;justify-content:space-between;align-items:center;gap:16px}
+.ai-result-title{font-size:22px;font-weight:700;color:#0f2747;margin:0}.ai-result-sub{font-size:13px;color:#64748b;margin-top:5px}
+.ai-status{padding:7px 12px;border-radius:999px;background:#eef4ff;color:#1459c7;font-size:13px;font-weight:700}
+.ai-result-body{padding:22px 24px}.ai-score{font-size:42px;font-weight:800;color:#0f2747}.ai-score small{font-size:16px;color:#64748b}
+.ai-note{padding:14px 16px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px;color:#475569;font-size:13px;line-height:1.6}
+.ai-grid{display:grid;grid-template-columns:160px 1fr;gap:20px;align-items:center}.ai-section{margin-top:22px}.ai-section h3{font-size:14px;color:#17365d;margin:0 0 10px}
+.ai-chips{display:flex;flex-wrap:wrap;gap:8px}.ai-chip{padding:7px 10px;border:1px solid #dbe4f0;border-radius:999px;background:#f8fafc;color:#334155;font-size:13px}
+.ai-error{border-color:#fecaca}.ai-error .ai-result-head{background:#fff7f7;border-bottom-color:#fee2e2}.ai-error .ai-result-title{color:#991b1b}
+.ai-error-icon{width:38px;height:38px;border-radius:50%;background:#fee2e2;color:#b91c1c;display:flex;align-items:center;justify-content:center;font-weight:800}
+.ai-error-box{padding:15px 16px;border:1px solid #fecaca;background:#fff7f7;border-radius:12px;color:#7f1d1d;font-size:13px;line-height:1.6}
+.ai-error-code{display:inline-block;margin-top:9px;padding:4px 8px;border-radius:6px;background:#fee2e2;color:#991b1b;font:600 12px ui-monospace,SFMono-Regular,Menlo,monospace}
+@media(max-width:700px){.ai-grid{grid-template-columns:1fr}.ai-result-head{align-items:flex-start}}
+</style>
+<script>
+function screenEsc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function screenChips(v){
+  let a=Array.isArray(v)?v:[];
+  return a.length?a.map(x=>'<span class="ai-chip">'+screenEsc(x)+'</span>').join(''):'<span class="ai-chip">None identified</span>';
+}
+function renderProfessionalScreeningResult(raw){
+  const host=document.querySelector('#screening-result');
+  if(!host)return;
+  let d=raw;
+  if(typeof raw==='string'){try{d=JSON.parse(raw)}catch{d={error:raw}}}
+  if(d&&d.error){
+    const code=String(d.error), detail=String(d.detail||'');
+    let title='AI Screening unavailable', msg='The AI screening service could not complete this request.';
+    if(code==='cv_not_extracted'){title='CV extraction required';msg='Please extract this CV first, then run AI Screening.'}
+    else if(code==='ai_not_configured'){title='AI service not configured';msg='The AI provider is not configured for this workspace.'}
+    else if(code==='ai_request_failed'){title='AI screening could not be completed';msg='The AI provider rejected or could not process the request. Check the AI configuration and available credits.'}
+    else if(code==='cv_extraction_failed'){title='CV extraction could not be completed';msg='The CV could not be processed by the AI extraction service.'}
+    host.innerHTML='<div class="ai-result-card ai-error"><div class="ai-result-head"><div><h2 class="ai-result-title">'+screenEsc(title)+'</h2><div class="ai-result-sub">AI Screening</div></div><div class="ai-error-icon">!</div></div><div class="ai-result-body"><div class="ai-error-box">'+screenEsc(msg)+(detail?'<div class="ai-error-code">'+screenEsc(detail)+'</div>':'<div class="ai-error-code">'+screenEsc(code)+'</div>')+'</div><div class="ai-section"><div class="ai-note">No candidate score was changed. You can retry after the AI service is available.</div></div></div></div>';
+    return;
+  }
+  const score=Number(d?.overall_score??d?.score??0), status=String(d?.status||'Screened'), summary=String(d?.summary||d?.note||'Screening completed.');
+  host.innerHTML='<div class="ai-result-card"><div class="ai-result-head"><div><h2 class="ai-result-title">AI Screening Result</h2><div class="ai-result-sub">Candidate assessment</div></div><span class="ai-status">'+screenEsc(status)+'</span></div><div class="ai-result-body"><div class="ai-grid"><div><div class="ai-score">'+screenEsc(score)+'<small> / 100</small></div><div class="ai-result-sub">Overall score</div></div><div class="ai-note">'+screenEsc(summary)+'</div></div><div class="ai-section"><h3>Matched skills</h3><div class="ai-chips">'+screenChips(d?.matched_skills)+'</div></div><div class="ai-section"><h3>Skills to review</h3><div class="ai-chips">'+screenChips(d?.missing_skills)+'</div></div></div></div>';
+}
+</script>
+<h2>Screening result</h2><pre id="resultText" style="white-space:pre-wrap"></pre></div></section>
 </main></div>
 <script src="/app.js?v=625" defer></script></body></html>`));
 
