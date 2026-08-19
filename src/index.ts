@@ -488,6 +488,26 @@ app.get("/", (c) => c.html(`<!doctype html>
 .screen-error-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#b91c1c;margin-bottom:7px}
 .screen-error-detail{font-size:13px;line-height:1.6;color:#64748b;white-space:pre-wrap}
 @media(max-width:700px){.screen-result-top{align-items:flex-start;flex-direction:column}.screen-grid,.screen-meta{grid-template-columns:1fr}}
+
+.screen-result-card{border:1px solid #dbe3ef;border-radius:16px;background:#fff;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,.06)}
+.screen-result-top{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:22px 24px;border-bottom:1px solid #e7edf5}
+.screen-eyebrow{font-size:11px;font-weight:700;letter-spacing:.12em;color:#64748b;margin-bottom:5px}
+.screen-result-title{font-size:20px;font-weight:750;color:#0f172a}
+.screen-score{min-width:100px;text-align:center;padding:10px 14px;border-radius:14px}
+.screen-score-number{font-size:30px;font-weight:800;line-height:1}
+.screen-score-label{font-size:12px;color:#64748b;margin-left:3px}
+.score-strong{background:#ecfdf3;color:#047857}.score-good{background:#eff6ff;color:#1d4ed8}.score-review{background:#fff7ed;color:#c2410c}.score-low{background:#fef2f2;color:#b91c1c}.score-na{background:#f1f5f9;color:#64748b}
+.screen-status-row{padding:14px 24px 0}.screen-status{display:inline-flex;padding:6px 11px;border-radius:999px;font-size:12px;font-weight:700}
+.status-strong{background:#dcfce7;color:#166534}.status-potential{background:#dbeafe;color:#1d4ed8}.status-low{background:#fee2e2;color:#b91c1c}.status-review{background:#f1f5f9;color:#475569}
+.screen-section{padding:20px 24px 0}.screen-section-title{font-size:13px;font-weight:750;color:#334155;margin-bottom:9px}.screen-summary{font-size:14px;line-height:1.65;color:#475569}
+.screen-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:20px 24px 0}.screen-panel{border:1px solid #e2e8f0;border-radius:12px;padding:16px;background:#f8fafc}
+.screen-list{margin:0;padding-left:20px;color:#475569;font-size:13px;line-height:1.7}.screen-empty{font-size:13px;color:#94a3b8}
+.skill-wrap{display:flex;flex-wrap:wrap;gap:7px}.skill-chip{display:inline-flex;padding:6px 9px;border-radius:8px;font-size:12px;font-weight:600}.skill-match{background:#ecfdf5;color:#047857}.skill-missing{background:#fff1f2;color:#be123c}
+.screen-recommendation{margin:20px 24px 24px;padding:15px 16px;border-left:4px solid #2563eb;background:#eff6ff;border-radius:10px;color:#334155;font-size:14px;line-height:1.6}
+.screen-error{display:flex;gap:14px;align-items:flex-start;padding:20px 22px;border:1px solid #fecaca;background:#fff7f7;border-radius:12px}
+.screen-error-icon{width:34px;height:34px;display:flex;align-items:center;justify-content:center;border-radius:10px;background:#fee2e2;color:#b91c1c;font-weight:800;font-size:12px;flex:none}
+.screen-error-title{font-size:16px;font-weight:750;color:#991b1b;margin-bottom:6px}.screen-error-code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;color:#b91c1c;margin-bottom:7px}.screen-error-detail{font-size:13px;line-height:1.6;color:#64748b;white-space:pre-wrap}.screen-error-action{margin-top:10px;padding:10px 12px;background:#fff;border-radius:8px;color:#475569;font-size:12px;line-height:1.5}
+@media(max-width:700px){.screen-result-top{align-items:flex-start;flex-direction:column}.screen-grid{grid-template-columns:1fr}}
 </style></head><body>
 <div id="auth" class="auth card"><div class="brand"><img src="/logo.png" onerror="this.style.display='none'"><span>${c.env.APP_NAME}</span></div><h2 id="authTitle">Sign in</h2><p class="muted">Secure recruiter workspace with tenant isolation.</p><form id="authForm"><div id="orgField" class="hidden"><label>Organization</label><input class="input" id="org" autocomplete="organization"></div><label>Name</label><input class="input" id="name" autocomplete="name"><label>Email</label><input class="input" id="email" type="email" autocomplete="email" required><label>Password</label><input class="input" id="password" type="password" minlength="10" autocomplete="current-password" required><button class="btn" id="authBtn">Sign in</button></form><p><button class="btn secondary" id="toggleAuth">Create an organization</button></p><div id="authMsg" class="muted"></div></div>
 <div id="app" class="hidden"><header><div class="brand"><img src="/logo.png" onerror="this.style.display='none'"><span>${c.env.APP_NAME}</span></div><div><span id="who" class="muted"></span> <button class="btn secondary" id="logout">Logout</button></div></header><main><div class="tabs"><button data-tab="overview">Overview</button><button class="secondary" data-tab="jobs">Jobs</button><button class="secondary" data-tab="candidates">Candidates</button><button class="secondary" data-tab="applications">Screening</button></div>
