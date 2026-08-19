@@ -114,7 +114,28 @@ app.post("/api/auth/register",async c=>{
     return c.json({error:"registration_failed",stage:"request",detail:String(e?.message||e)},500);
   }
 });
-app.post("/api/auth/login",async c=>{try{const b=await c.req.json<any>(),email=String(b.email||"").trim().toLowerCase(),password=String(b.password||"");const r=await c.env.DB.prepare("SELECT u.id,u.company_id,u.name,u.email,u.password_hash,u.role,COALESCE(cp.company_name,u.name) company_name FROM users u LEFT JOIN company_profiles cp ON cp.user_id=u.company_id WHERE u.email=? LIMIT 1").bind(email).first<any>();if(!r||!(await passwordVerify(password,r.password_hash)))return c.json({error:"invalid_credentials"},401);const u:AuthUser={id:r.id,company_id:r.company_id||r.id,name:r.name,email:r.email,role:r.role,company_name:r.company_name};await createSession(c,u);await audit(c,u,"auth.login",u.id);return c.json({user:u})}catch(e:any){return c.json({error:"login_failed",detail:String(e?.message||e)},500)}});
+app.post("/api/auth/login",async c=>{
+  try{
+    const b=await c.req.json<any>();
+    const email=String(b.email||"").trim().toLowerCase();
+    const password=String(b.password||"");
+    if(!email||!password)return c.json({error:"email_password_required"},400);
+    const r=await c.env.DB.prepare(
+      "SELECT u.id,u.company_id,u.name,u.email,u.password_hash,u.role,COALESCE(cp.company_name,u.name) company_name "+
+      "FROM users u LEFT JOIN company_profiles cp ON cp.user_id=u.company_id "+
+      "WHERE lower(u.email)=? LIMIT 1"
+    ).bind(email).first<any>();
+    if(!r)return c.json({error:"invalid_credentials"},401);
+    if(!(await passwordVerify(password,r.password_hash)))return c.json({error:"invalid_credentials"},401);
+    const u:AuthUser={id:r.id,company_id:r.company_id||r.id,name:r.name,email:r.email,role:r.role,company_name:r.company_name};
+    await createSession(c,u);
+    await audit(c,u,"auth.login",u.id);
+    c.header("Cache-Control","no-store");
+    return c.json({user:u});
+  }catch(e:any){
+    return c.json({error:"login_failed",detail:String(e?.message||e)},500);
+  }
+});
 app.post("/api/auth/logout",async c=>{
   try{
     const raw=cookieToken(c.req.raw);
@@ -280,10 +301,19 @@ app.get("/api/applications",async c=>{
     const m=await appMeta(c.env.DB);
     if(!m.candidate)return c.json({error:"applications_missing_candidate_key"},500);
     const tenant=m.tenant?`AND a.${m.tenant}=?`:"";
-    const scoreColumn=m.cs.has("ai_score")?"a.ai_score":m.cs.has("score")?"a.score":"NULL";
-    const sql=`SELECT a.id,a.status,${scoreColumn} screening_score,a.ai_recommendation,a.ai_summary,a.ai_strengths,a.ai_weaknesses,a.ai_matched_skills,a.ai_missing_skills,a.ai_interview_questions,j.id job_id,j.title job_title,cu.id candidate_id,cu.name candidate_name,cp.cv_url,cp.summary cv_summary,cp.skills,cp.experience_years FROM applications a JOIN jobs j ON j.id=a.job_id JOIN users cu ON cu.id=a.${m.candidate} LEFT JOIN candidate_profiles cp ON cp.user_id=cu.id WHERE j.company_id=? ${tenant} ORDER BY a.rowid DESC`;
+    const score=m.cs.has("ai_score")?"a.ai_score":m.cs.has("score")?"a.score":"NULL";
+    const sql=`SELECT a.id,a.status,${score} screening_score,a.ai_recommendation,a.ai_summary,
+      a.ai_strengths,a.ai_weaknesses,a.ai_matched_skills,a.ai_missing_skills,
+      a.ai_interview_questions,j.id job_id,j.title job_title,cu.id candidate_id,
+      cu.name candidate_name,cp.cv_url,cp.summary cv_summary,cp.skills,cp.experience_years
+      FROM applications a
+      JOIN jobs j ON j.id=a.job_id
+      JOIN users cu ON cu.id=a.${m.candidate}
+      LEFT JOIN candidate_profiles cp ON cp.user_id=cu.id
+      WHERE j.company_id=? ${tenant}
+      ORDER BY a.rowid DESC`;
     const params=m.tenant?[u.company_id,u.company_id]:[u.company_id];
-    return c.json((await c.env.DB.prepare(sql).bind(...params).all()).results);
+    return c.json((await c.env.DB.prepare(sql).bind(...params).all()).results||[]);
   }catch(e:any){
     return c.json({error:"applications_query_failed",detail:String(e?.message||e)},500);
   }
@@ -307,15 +337,19 @@ app.post("/api/screenings/rule",async c=>{
     if(r.skills){
       try{skills=JSON.parse(r.skills)}catch{skills=String(r.skills).split(/[,|]/).map((x:string)=>x.trim()).filter(Boolean)}
     }
-    const text=String(r.summary||"").toLowerCase();
-    const hits=skills.filter(s=>text.includes(String(s).toLowerCase()));
+    const profile=String(r.summary||"").toLowerCase();
+    const hits=skills.filter(s=>profile.includes(String(s).toLowerCase()));
     const score=skills.length?Math.round(hits.length/skills.length*100):(Number(r.experience_years||0)>0?70:50);
     const status=score>=85?"Strong Match":score>=70?"Potential Match":"Low Match";
-    const updates:any[]=[];
-    if(m.cs.has("ai_score"))updates.push(c.env.DB.prepare("UPDATE applications SET ai_score=?,status=?,ai_recommendation=?,ai_summary=?,ai_matched_skills=?,ai_missing_skills=?,ai_screened_at=CURRENT_TIMESTAMP WHERE id=?").bind(score,status,"Rule-based screening",`Rule-based screening for ${r.title}.`,JSON.stringify(hits),JSON.stringify(skills.filter(s=>!hits.includes(s))),b.application_id));
-    else if(m.cs.has("score"))updates.push(c.env.DB.prepare("UPDATE applications SET score=?,status=? WHERE id=?").bind(score,status,b.application_id));
-    else if(m.cs.has("status"))updates.push(c.env.DB.prepare("UPDATE applications SET status=? WHERE id=?").bind(status,b.application_id));
-    if(updates.length)await Promise.all(updates.map((x:any)=>x.run()));
+    if(m.cs.has("ai_score")){
+      await c.env.DB.prepare(
+        "UPDATE applications SET ai_score=?,status=?,ai_recommendation=?,ai_summary=?,ai_matched_skills=?,ai_missing_skills=?,ai_screened_at=CURRENT_TIMESTAMP WHERE id=?"
+      ).bind(score,status,"Rule-based screening",`Rule-based screening for ${r.title}.`,JSON.stringify(hits),JSON.stringify(skills.filter(s=>!hits.includes(s))),b.application_id).run();
+    }else if(m.cs.has("score")){
+      await c.env.DB.prepare("UPDATE applications SET score=?,status=? WHERE id=?").bind(score,status,b.application_id).run();
+    }else if(m.cs.has("status")){
+      await c.env.DB.prepare("UPDATE applications SET status=? WHERE id=?").bind(status,b.application_id).run();
+    }
     await audit(c,u,"screening.rule",b.application_id);
     return c.json({overall_score:score,status,matched_skills:hits,missing_skills:skills.filter(s=>!hits.includes(s)),note:"Rule-based screening; recruiter makes the final decision."});
   }catch(e:any){
@@ -344,16 +378,14 @@ $('#toggleAuth').onclick=e=>{e.preventDefault();setMode()};
 $('#authForm').onsubmit=async e=>{e.preventDefault();$('#authMsg').textContent='Working...';try{const path=registerMode?'/api/auth/register':'/api/auth/login';const body=registerMode?{organization_name:$('#org').value,name:$('#name').value,email:$('#email').value,password:$('#password').value}:{email:$('#email').value,password:$('#password').value};const r=await api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});$('#auth').classList.add('hidden');$('#app').classList.remove('hidden');$('#who').textContent=r.user.name+' · '+(r.user.company_name||'');$('#authMsg').textContent='Loading dashboard...';try{await refresh();$('#authMsg').textContent=''}catch(e){$('#authMsg').textContent='Dashboard error: '+e.message}}catch(err){$('#authMsg').textContent=err.message}}
 $('#logout').onclick=async()=>{await api('/api/auth/logout',{method:'POST'});location.reload()};
 $$('.tabs button').forEach(b=>b.onclick=()=>{$$('.tabs button').forEach(x=>x.classList.add('secondary'));b.classList.remove('secondary');$$('.tab').forEach(x=>x.classList.add('hidden'));$('#'+b.dataset.tab).classList.remove('hidden');if(b.dataset.tab==='jobs')loadJobs();if(b.dataset.tab==='candidates')loadCandidates();if(b.dataset.tab==='applications')loadApps()});
-async function loadJobs(){const jobs=await api('/api/jobs');$('#jobsBody').innerHTML=jobs.map(j=>\`<tr><td>\${esc(j.title)}</td><td>\${esc(j.location||'-')}</td><td>\${new Date(j.created_at).toLocaleString()}</td></tr>\`).join('');$('#candidateJob').innerHTML='<option value="">Select job position</option>'+jobs.map(j=>\`<option value="\${j.id}">\${esc(j.title)}</option>\`).join('')}
+async function loadJobs(){const jobs=await api('/api/jobs');$('#jobsBody').innerHTML=jobs.map(j=>\`<tr><td>\${esc(j.title)}</td><td>\${esc(j.location||'-')}</td><td>\${new Date(j.created_at).toLocaleString()}</td></tr>\`).join('');$('#candidateJob').innerHTML='<option value="">Attach to job (optional)</option>'+jobs.map(j=>\`<option value="\${j.id}">\${esc(j.title)}</option>\`).join('')}
 async function loadCandidates(){const rows=await api('/api/candidates');$('#candidatesBody').innerHTML=rows.map(x=>'<tr><td>'+esc(x.cv_url||x.full_name||'-')+'</td><td>'+esc(x.job_title||'-')+'</td><td>'+(x.score==null?'-':x.score)+'</td><td><span class="pill">'+esc(x.status||'Uploaded')+'</span></td></tr>').join('')}
 async function loadApps(){
   try{
     const rows=await api('/api/applications');
     $('#appsBody').innerHTML=rows.map(x=>{
       const score=x.screening_score==null?'-':x.screening_score;
-      const hasCv=!!x.cv_url;
-      const status=x.status||'Review';
-      return '<tr><td>'+esc(x.candidate_name||'CV Candidate')+'</td><td>'+esc(x.job_title||'-')+'</td><td><strong>'+score+'</strong></td><td><span class="pill">'+esc(status)+'</span></td><td><button class="btn secondary" onclick="rule(\''+x.id+'\')">Rule</button> <button class="btn" onclick="ai(\''+x.id+'\')" '+(hasCv?'':'disabled')+'>AI</button></td></tr>';
+      return '<tr><td>'+esc(x.candidate_name||'CV Candidate')+'</td><td>'+esc(x.job_title||'-')+'</td><td><strong>'+score+'</strong></td><td><span class="pill">'+esc(x.status||'Review')+'</span></td><td><button class="btn secondary" onclick="rule(\\''+x.id+'\\')">Rule</button> <button class="btn" onclick="ai(\\''+x.id+'\\')">AI</button></td></tr>';
     }).join('');
   }catch(e){
     $('#appsBody').innerHTML='<tr><td colspan="5">Screening load failed: '+esc(e.message)+'</td></tr>';
