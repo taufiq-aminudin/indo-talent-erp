@@ -281,12 +281,12 @@ app.get("/", (c) => c.html(`<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${c.env.APP_NAME}</title>
 <style>
 :root{font-family:Inter,system-ui,-apple-system,sans-serif;color:#10213b;background:#f6f8fb}body{margin:0}header{background:#fff;border-bottom:1px solid #e5eaf2;padding:18px 28px;display:flex;justify-content:space-between;align-items:center}main{max-width:1180px;margin:28px auto;padding:0 20px}.brand{display:flex;align-items:center;gap:12px;font-weight:800;font-size:22px}.brand img{width:42px;height:42px;object-fit:contain}.muted{color:#667085}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.card{background:#fff;border:1px solid #e4e9f1;border-radius:16px;padding:20px;box-shadow:0 3px 14px #132b4a0a;margin-bottom:18px}.metric b{font-size:30px;display:block;margin-top:8px}.tabs{display:flex;gap:8px;margin:18px 0}.tabs button,.btn{border:0;border-radius:10px;padding:10px 14px;background:#0b66ff;color:white;cursor:pointer}.tabs button.secondary,.btn.secondary{background:#edf2f8;color:#20304a}.hidden{display:none}.auth{max-width:480px;margin:60px auto}.input{width:100%;box-sizing:border-box;padding:12px;border:1px solid #d7deea;border-radius:10px;margin:6px 0 12px}.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}.table{width:100%;border-collapse:collapse}.table th,.table td{text-align:left;padding:11px;border-bottom:1px solid #edf0f5}.pill{display:inline-block;padding:4px 8px;border-radius:999px;background:#edf4ff}.danger{color:#b42318}.logo{max-width:58px;max-height:58px}@media(max-width:800px){.grid,.row{grid-template-columns:1fr}.grid{grid-template-columns:1fr 1fr}}
-</style></head><body>
+.upload-options{display:grid;grid-template-columns:1fr 1fr;gap:12px;width:100%}.upload-option{border:1px solid #d7deea;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:8px;font-weight:600}.upload-option input{width:100%}@media(max-width:700px){.upload-options{grid-template-columns:1fr}}</style></head><body>
 <div id="auth" class="auth card"><div class="brand"><img src="/logo.png" onerror="this.style.display='none'"><span>${c.env.APP_NAME}</span></div><h2 id="authTitle">Sign in</h2><p class="muted">Secure recruiter workspace with tenant isolation.</p><form id="authForm"><div id="orgField" class="hidden"><label>Organization</label><input class="input" id="org" autocomplete="organization"></div><label>Name</label><input class="input" id="name" autocomplete="name"><label>Email</label><input class="input" id="email" type="email" autocomplete="email" required><label>Password</label><input class="input" id="password" type="password" minlength="10" autocomplete="current-password" required><button class="btn" id="authBtn">Sign in</button></form><p><button class="btn secondary" id="toggleAuth">Create an organization</button></p><div id="authMsg" class="muted"></div></div>
 <div id="app" class="hidden"><header><div class="brand"><img src="/logo.png" onerror="this.style.display='none'"><span>${c.env.APP_NAME}</span></div><div><span id="who" class="muted"></span> <button class="btn secondary" id="logout">Logout</button></div></header><main><div class="tabs"><button data-tab="overview">Overview</button><button class="secondary" data-tab="jobs">Jobs</button><button class="secondary" data-tab="candidates">Candidates</button><button class="secondary" data-tab="applications">Screening</button></div>
 <section id="overview" class="tab"><div class="grid"><div class="card metric">Jobs<b id="mJobs">0</b></div><div class="card metric">Candidates<b id="mCandidates">0</b></div><div class="card metric">Applications<b id="mApplications">0</b></div><div class="card metric">Strong matches<b id="mStrong">0</b></div></div><div class="card"><h2>AI Screening</h2><p class="muted">Create jobs, upload CVs, attach candidates to jobs, then run rule-based or AI screening.</p></div></section>
 <section id="jobs" class="tab hidden"><div class="card"><h2>Create job</h2><form id="jobForm"><div class="row"><input class="input" id="jobTitle" placeholder="Job title" required><input class="input" id="jobLocation" placeholder="Location"></div><textarea class="input" id="jobDescription" rows="6" placeholder="Job description" required></textarea><input class="input" id="jobSkills" placeholder="Skills, comma separated"><button class="btn" type="submit">Create job</button><p id="jobMsg" class="muted"></p></form></div><div class="card"><h2>Jobs</h2><table class="table"><thead><tr><th>Title</th><th>Location</th><th>Created</th></tr></thead><tbody id="jobsBody"></tbody></table></div></section>
-<section id="candidates" class="tab hidden"><div class="card"><h2>Upload CV</h2><p class="muted">Pilih satu atau banyak CV sekaligus. Anda juga bisa memilih satu folder berisi CV. Nama, email, dan nomor HP tidak diperlukan.</p><form id="candidateForm"><div class="row"><select class="input" id="candidateJob" required><option value="">Select job position</option></select><input class="input" id="candidateFiles" type="file" accept=".pdf,.docx,.txt" multiple webkitdirectory directory required></div><button class="btn">Upload CVs</button><p id="candidateMsg" class="muted"></p></form></div><div class="card"><h2>Candidate Screening Pool</h2><table class="table"><thead><tr><th>CV</th><th>Job</th><th>Score</th><th>Status</th></tr></thead><tbody id="candidatesBody"></tbody></table></div></section>
+<section id="candidates" class="tab hidden"><div class="card"><h2>Upload CV</h2><p class="muted">Pilih satu atau banyak CV sekaligus. Anda juga bisa memilih satu folder berisi CV. Nama, email, dan nomor HP tidak diperlukan.</p><form id="candidateForm"><div class="row"><select class="input" id="candidateJob" required><option value="">Select job position</option></select><div class="upload-options"><label class="upload-option"><span>📄 Upload file(s)</span><input class="input" id="candidateFiles" type="file" accept=".pdf,.docx,.txt" multiple></label><label class="upload-option"><span>📁 Upload folder</span><input class="input" id="candidateFolder" type="file" accept=".pdf,.docx,.txt" multiple webkitdirectory directory></label></div></div><button class="btn">Upload CVs</button><p id="candidateMsg" class="muted"></p></form></div><div class="card"><h2>Candidate Screening Pool</h2><table class="table"><thead><tr><th>CV</th><th>Job</th><th>Score</th><th>Status</th></tr></thead><tbody id="candidatesBody"></tbody></table></div></section>
 <section id="applications" class="tab hidden"><div class="card"><h2>Screening pipeline</h2><table class="table"><thead><tr><th>Candidate</th><th>Job</th><th>Score</th><th>Status</th><th>Actions</th></tr></thead><tbody id="appsBody"></tbody></table></div><div id="result" class="card hidden"><h2>Screening result</h2><pre id="resultText" style="white-space:pre-wrap"></pre></div></section>
 </main></div>
 <script>
@@ -320,7 +320,31 @@ $('#jobForm').onsubmit=async e=>{
     msg.textContent='Create job failed: '+err.message;
   }
 }
-$('#candidateForm').onsubmit=async e=>{e.preventDefault();const files=[...$('#candidateFiles').files];if(!files.length){$('#candidateMsg').textContent='Pilih minimal 1 CV.';return}if(files.length>50){$('#candidateMsg').textContent='Maksimal 50 CV per upload.';return}const fd=new FormData();fd.append('job_id',$('#candidateJob').value);files.forEach(file=>fd.append('files',file,file.name));$('#candidateMsg').textContent='Uploading '+files.length+' CV...';try{const r=await api('/api/candidates/upload',{method:'POST',body:fd});$('#candidateMsg').textContent=r.uploaded+' CV berhasil diupload'+(r.failed?', '+r.failed+' gagal':'')+'.';e.target.reset();await refresh();loadCandidates()}catch(err){$('#candidateMsg').textContent=err.message}}
+$('#candidateForm').onsubmit=async e=>{
+  e.preventDefault();
+  const files=[...$('#candidateFiles').files,...$('#candidateFolder').files];
+  const unique=[];
+  const seen=new Set();
+  for(const file of files){
+    const key=file.name+'|'+file.size+'|'+file.lastModified;
+    if(!seen.has(key)){seen.add(key);unique.push(file)}
+  }
+  if(!unique.length){$('#candidateMsg').textContent='Pilih file CV atau folder CV terlebih dahulu.';return}
+  if(unique.length>50){$('#candidateMsg').textContent='Maksimal 50 CV per upload.';return}
+  const fd=new FormData();
+  fd.append('job_id',$('#candidateJob').value);
+  unique.forEach(file=>fd.append('files',file,file.name));
+  $('#candidateMsg').textContent='Uploading '+unique.length+' CV...';
+  try{
+    const r=await api('/api/candidates/upload',{method:'POST',body:fd});
+    $('#candidateMsg').textContent=r.uploaded+' CV berhasil diupload'+(r.failed?', '+r.failed+' gagal':'')+'.';
+    e.target.reset();
+    await refresh();
+    loadCandidates()
+  }catch(err){
+    $('#candidateMsg').textContent=err.message
+  }
+}
 window.rule=async id=>{try{const r=await api('/api/screenings/rule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({application_id:id})});showResult(r);await refresh();loadApps()}catch(e){showResult({error:e.message})}}
 window.ai=async id=>{try{const r=await api('/api/ai/screen',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({application_id:id})});showResult(r);await refresh();loadApps()}catch(e){showResult({error:e.message})}}
 function showResult(x){$('#result').classList.remove('hidden');$('#resultText').textContent=JSON.stringify(x,null,2)}
