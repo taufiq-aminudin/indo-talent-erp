@@ -22,15 +22,25 @@ function hex(bytes:Uint8Array){return [...bytes].map(b=>b.toString(16).padStart(
 async function sha256(v:string){return hex(new Uint8Array(await crypto.subtle.digest("SHA-256",enc.encode(v))))}
 async function passwordHash(password:string){const salt=new Uint8Array(16);crypto.getRandomValues(salt);const key=await crypto.subtle.importKey("raw",enc.encode(password),"PBKDF2",false,["deriveBits"]);const bits=await crypto.subtle.deriveBits({name:"PBKDF2",salt,iterations:100000,hash:"SHA-256"},key,256);return `pbkdf2$100000$${b64url(salt)}$${b64url(new Uint8Array(bits))}`}
 async function passwordVerify(password:string,stored:string){try{const [scheme,it,saltText,expected]=stored.split("$");if(scheme!=="pbkdf2")return false;const sb=saltText.replace(/-/g,"+").replace(/_/g,"/");const bin=atob(sb+"=".repeat((4-sb.length%4)%4));const salt=Uint8Array.from(bin,c=>c.charCodeAt(0));const key=await crypto.subtle.importKey("raw",enc.encode(password),"PBKDF2",false,["deriveBits"]);const iterations=Math.min(Number(it)||100000,100000);const bits=await crypto.subtle.deriveBits({name:"PBKDF2",salt,iterations,hash:"SHA-256"},key,256);return b64url(new Uint8Array(bits))===expected}catch{return false}}
-function cookieToken(req:Request){return (req.headers.get("Cookie")||"").match(/(?:^|;\s*)session=([^;]+)/)?.[1]||null}
-function setCookie(token:string,maxAge:number){return `session=${token}; Max-Age=${maxAge}; Path=/; HttpOnly; Secure; SameSite=Lax`}
+function cookieToken(req:Request){
+  const h=req.headers.get("Cookie")||"";
+  return h.match(/(?:^|;\s*)ats_session=([^;]+)/)?.[1]
+    || h.match(/(?:^|;\s*)session=([^;]+)/)?.[1]
+    || null;
+}
+function setCookie(token:string,maxAge:number){
+  return `ats_session=${token}; Max-Age=${maxAge}; Path=/; HttpOnly; Secure; SameSite=Lax`;
+}
+function clearLegacyCookie(){
+  return "session=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax";
+}
 async function columns(db:D1Database,table:string){const r=await db.prepare(`PRAGMA table_info(${table})`).all<any>();return new Set((r.results||[]).map((x:any)=>String(x.name)))}
 async function createSession(c:any,u:AuthUser){
   const token=b64url(crypto.getRandomValues(new Uint8Array(32)));
   const expires=new Date(Date.now()+7*86400000).toISOString();
   await c.env.DB.prepare("INSERT INTO sessions(token,user_id,expires_at) VALUES(?,?,?)")
     .bind(await sha256(token),u.id,expires).run();
-  c.header("Set-Cookie",setCookie(token,7*86400));
+  c.header("Set-Cookie",setCookie(token,7*86400));c.header("Set-Cookie",clearLegacyCookie());
 }
 async function currentUser(c:any):Promise<AuthUser|null>{
   const raw=cookieToken(c.req.raw);
@@ -105,7 +115,15 @@ app.post("/api/auth/register",async c=>{
   }
 });
 app.post("/api/auth/login",async c=>{try{const b=await c.req.json<any>(),email=String(b.email||"").trim().toLowerCase(),password=String(b.password||"");const r=await c.env.DB.prepare("SELECT u.id,u.company_id,u.name,u.email,u.password_hash,u.role,COALESCE(cp.company_name,u.name) company_name FROM users u LEFT JOIN company_profiles cp ON cp.user_id=u.company_id WHERE u.email=? LIMIT 1").bind(email).first<any>();if(!r||!(await passwordVerify(password,r.password_hash)))return c.json({error:"invalid_credentials"},401);const u:AuthUser={id:r.id,company_id:r.company_id||r.id,name:r.name,email:r.email,role:r.role,company_name:r.company_name};await createSession(c,u);await audit(c,u,"auth.login",u.id);return c.json({user:u})}catch(e:any){return c.json({error:"login_failed",detail:String(e?.message||e)},500)}});
-app.post("/api/auth/logout",async c=>{try{const raw=cookieToken(c.req.raw);const cs=await columns(c.env.DB,"sessions");const tokenCol=cs.has("id")?"id":cs.has("session_id")?"session_id":cs.has("token_hash")?"token_hash":cs.has("token")?"token":null;if(raw&&tokenCol)await c.env.DB.prepare(`DELETE FROM sessions WHERE ${tokenCol}=?`).bind(await sha256(raw)).run();c.header("Set-Cookie",setCookie("",0));return c.json({ok:true})}catch{return c.json({ok:true})}});
+app.post("/api/auth/logout",async c=>{
+  try{
+    const raw=cookieToken(c.req.raw);
+    if(raw)await c.env.DB.prepare("DELETE FROM sessions WHERE token=?").bind(await sha256(raw)).run();
+  }catch{}
+  c.header("Set-Cookie",setCookie("",0));
+  c.header("Set-Cookie",clearLegacyCookie());
+  return c.json({ok:true});
+});
 app.get("/api/auth/me",requireAuth,c=>c.json({user:c.get("user")}));
 app.get("/api/auth/status",async c=>{
   try{
@@ -117,10 +135,11 @@ app.get("/api/auth/status",async c=>{
 });
 for(const p of ["/api/candidates","/api/applications","/api/dashboard","/api/screenings/*"])app.use(p,requireAuth);
 app.get("/api/dashboard",async c=>{try{const u=c.get("user") as AuthUser;if(!u.company_id)return c.json({error:"company_id_missing"},403);const [j,ca,a]=await Promise.all([c.env.DB.prepare("SELECT COUNT(*) count FROM jobs WHERE company_id=?").bind(u.company_id).first<any>(),c.env.DB.prepare("SELECT COUNT(*) count FROM users WHERE company_id=? AND role='candidate'").bind(u.company_id).first<any>(),c.env.DB.prepare("SELECT COUNT(*) count FROM applications a JOIN jobs j ON j.id=a.job_id WHERE j.company_id=?").bind(u.company_id).first<any>()]);return c.json({jobs:Number(j?.count||0),candidates:Number(ca?.count||0),applications:Number(a?.count||0),strong_matches:0})}catch(e:any){return c.json({error:"dashboard_query_failed",detail:String(e?.message||e)},500)}});
-app.get("/api/jobs",requireAuth,async c=>{
+app.get("/api/jobs",async c=>{
   try{
-    const u=c.get("user") as AuthUser;
-    if(!u?.company_id)return c.json({error:"company_context_missing"},400);
+    const u=await currentUser(c);
+    if(!u)return c.json({error:"unauthorized",stage:"job_auth",cookie_present:!!cookieToken(c.req.raw)},401);
+    if(!u.company_id)return c.json({error:"company_context_missing"},400);
     const rows=await c.env.DB.prepare(
       "SELECT id,title,location,salary,description,status,created_at FROM jobs WHERE company_id=? ORDER BY created_at DESC"
     ).bind(u.company_id).all();
@@ -129,10 +148,11 @@ app.get("/api/jobs",requireAuth,async c=>{
     return c.json({error:"job_list_failed",detail:String(e?.message||e)},500);
   }
 });
-app.post("/api/jobs",requireAuth,async c=>{
+
+app.post("/api/jobs",async c=>{
   try{
-    const u=c.get("user") as AuthUser;
-    if(!u)return c.json({error:"unauthorized",stage:"job_auth"},401);
+    const u=await currentUser(c);
+    if(!u)return c.json({error:"unauthorized",stage:"job_auth",cookie_present:!!cookieToken(c.req.raw)},401);
     if(!u.company_id)return c.json({error:"company_context_missing",stage:"job_auth"},400);
     if(u.role!=="company"&&u.role!=="admin")return c.json({error:"company_role_required",stage:"job_auth",role:u.role},403);
 
@@ -141,10 +161,7 @@ app.post("/api/jobs",requireAuth,async c=>{
     const location=String(b.location||"").trim();
     const salary=String(b.salary||"").trim();
     const description=String(b.description||"").trim();
-    const requirements=Array.isArray(b.requirements)
-      ? b.requirements.map((x:any)=>String(x).trim()).filter(Boolean)
-      : [];
-
+    const requirements=Array.isArray(b.requirements)?b.requirements.map((x:any)=>String(x).trim()).filter(Boolean):[];
     if(!title||!description)return c.json({error:"title,description_required"},400);
 
     const finalDescription=requirements.length
