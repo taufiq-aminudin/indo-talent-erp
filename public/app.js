@@ -10,9 +10,20 @@ $$('.tabs button').forEach(b=>b.onclick=()=>{$$('.tabs button').forEach(x=>x.cla
 async function loadJobs(){
   const jobs=await api('/api/jobs');
   window.jobsCache=jobs;
-  $('#jobsBody').innerHTML=jobs.length?jobs.map(j=>`<tr><td><strong>${esc(j.title)}</strong></td><td>${esc(j.location||'-')}</td><td><span class="job-status">${esc(j.status||'open')}</span></td><td>${j.created_at?new Date(j.created_at).toLocaleString():'-'}</td><td><div class="job-actions"><button type="button" class="btn secondary job-action" onclick="editJob('${j.id}')">Edit</button><button type="button" class="btn secondary job-action job-danger" onclick="deleteJob('${j.id}')">Delete</button></div></td></tr>`).join(''):'<tr><td colspan="5" class="job-empty">No active jobs yet. Create your first job above.</td></tr>';
-  $('#candidateJob').innerHTML='<option value="">Attach to job (optional)</option>'+jobs.map(j=>`<option value="${j.id}">${esc(j.title)}</option>`).join('');
+  const body=$('#jobsBody');
+  body.innerHTML=jobs.length?jobs.map(j=>{
+    const req=extractJobRequirements(j.description);
+    return `<tr>
+      <td><div class="job-title-cell"><strong>${esc(j.title)}</strong><span>${esc(j.salary||'Salary not specified')}</span></div></td>
+      <td>${esc(j.location||'Not specified')}</td>
+      <td><span class="job-status ${String(j.status||'open')!=='open'?'closed':''}">${esc(j.status||'open')}</span></td>
+      <td>${j.created_at?new Date(j.created_at).toLocaleString():'-'}</td>
+      <td><div class="job-actions"><button type="button" class="btn secondary job-action" data-job-action="edit" data-job-id="${esc(j.id)}">Edit</button><button type="button" class="btn secondary job-action job-danger" data-job-action="delete" data-job-id="${esc(j.id)}">Delete</button></div></td>
+    </tr>`;
+  }).join(''):'<tr><td colspan="5" class="job-empty"><strong>No active jobs</strong><br><span>Create your first position above.</span></td></tr>';
+  $('#candidateJob').innerHTML='<option value="">Attach to job (optional)</option>'+jobs.map(j=>`<option value="${esc(j.id)}">${esc(j.title)}</option>`).join('');
 }
+
 function extractJobRequirements(description){
   const m=String(description||'').match(/Required skills:\s*([\s\S]*)$/i);
   if(!m)return '';
@@ -25,6 +36,13 @@ function startJobEdit(j){
   window.scrollTo({top:0,behavior:'smooth'});
 }
 window.editJob=id=>{const j=(window.jobsCache||[]).find(x=>x.id===id);if(j)startJobEdit(j)};
+document.addEventListener('click',e=>{
+  const btn=e.target.closest('[data-job-action]');
+  if(!btn)return;
+  const id=btn.dataset.jobId;
+  if(btn.dataset.jobAction==='edit')window.editJob(id);
+  if(btn.dataset.jobAction==='delete')window.deleteJob(id);
+});
 function resetJobForm(){
   $('#editingJobId').value='';$('#jobForm').reset();$('#jobFormTitle').textContent='Create job';$('#jobSubmitBtn').textContent='Create job';$('#jobResetBtn').classList.add('hidden');$('#cancelJobEdit').classList.add('hidden');$('#jobMsg').textContent='';
 }
@@ -33,7 +51,7 @@ async function deleteJob(id){
   if(!j)return;
   const ok=confirm('Delete job "'+j.title+'"?\n\nThe job will be removed from the active Jobs list. Existing candidate applications and screening history will be preserved.');
   if(!ok)return;
-  try{await api('/api/jobs/'+encodeURIComponent(id),{method:'DELETE'});if($('#editingJobId').value===id)resetJobForm();$('#jobMsg').textContent='Job deleted successfully.';await refresh()}catch(e){$('#jobMsg').textContent='Delete job failed: '+e.message}
+  try{await api('/api/jobs/'+encodeURIComponent(id)+'/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'});if($('#editingJobId').value===id)resetJobForm();$('#jobMsg').textContent='Job deleted successfully.';await refresh()}catch(e){$('#jobMsg').textContent='Delete job failed: '+e.message}
 }
 window.deleteJob=deleteJob;
 $('#refreshJobs').onclick=()=>loadJobs();$('#cancelJobEdit').onclick=resetJobForm;$('#jobResetBtn').onclick=resetJobForm;$('#manageJobsBtn').onclick=()=>document.querySelector('.tabs button[data-tab="jobs"]').click();
@@ -95,10 +113,12 @@ function resultList(v){
 
 function renderScreeningResult(data){
   const box=$('#result'),out=$('#resultText'); box.classList.remove('hidden');
+  if(data&&data.loading){out.innerHTML='<div class="screen-loading"><span class="loader-dot"></span><div><strong>Running screening…</strong><small>Comparing job requirements with candidate evidence.</small></div></div>';return;}
   if(data&&data.error){
     const detail=data.detail||data.message||data.error;
     let title='AI screening could not be completed', message='The AI service could not process this screening request.', action='Please check the AI service configuration and available credits, then try again.';
-    if(String(data.error)==='cv_not_extracted'){title='CV extraction required';message='This candidate has not been extracted yet.';action='Click “Extract CV” first, then run AI Screening.'}
+    if(String(data.error)==='cv_not_extracted'){title='CV extraction required';message='Candidate information has not been extracted from the CV yet.';action='Click “Extract CV” first. Rule Screening will then compare the extracted CV with the selected job.'}
+    else if(String(data.error)==='ai_quota_exhausted'){title='AI credits unavailable';message='The OpenAI API rejected the request because the configured account has no remaining credits.';action='Add API credits or configure another AI provider. Rule Screening can still be used after CV extraction.'}
     else if(String(data.error)==='ai_not_configured'){title='AI service is not configured';message='No AI provider is currently configured for this workspace.';action='Add a valid AI API configuration before running screening.'}
     else if(String(data.error)==='ai_request_failed'){title='AI screening temporarily unavailable';message='The AI provider rejected or could not complete this request.';action='Check API credits/quota and configuration, then retry. No candidate score was changed.'}
     else if(String(data.error)==='cv_extraction_failed'){title='CV extraction failed';message='The CV could not be processed by the extraction service.';action='Retry extraction after the AI service is available.'}
@@ -164,7 +184,8 @@ $('#jobForm').onsubmit=async e=>{
   msg.textContent=id?'Saving changes...':'Creating job...';
   try{
     const body={title:$('#jobTitle').value,location:$('#jobLocation').value,salary:$('#jobSalary').value,description:$('#jobDescription').value,requirements:$('#jobSkills').value.split(',').map(x=>x.trim()).filter(Boolean)};
-    await api(id?('/api/jobs/'+encodeURIComponent(id)):'/api/jobs',{method:id?'PATCH':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    const endpoint=id?('/api/jobs/'+encodeURIComponent(id)+'/update'):'/api/jobs';
+    await api(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
     resetJobForm();msg.textContent=id?'Job updated successfully.':'Job created successfully.';
     await refresh();
   }catch(err){msg.textContent=(id?'Update job failed: ':'Create job failed: ')+err.message;}
@@ -213,8 +234,16 @@ $('#candidateForm').onsubmit=async e=>{
   await refresh();
   await loadCandidates();
 }
-window.rule=async id=>{try{const r=await api('/api/screenings/rule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({application_id:id})});showResult(r);await refresh();loadApps()}catch(e){showResult({error:e.message})}}
-window.ai=async id=>{try{const r=await api('/api/ai/screen',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({application_id:id})});showResult(r);await refresh();loadApps()}catch(e){showResult({error:e.message})}}
+window.rule=async id=>{
+  showResult({loading:true});
+  try{const r=await api('/api/screenings/rule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({application_id:id})});showResult(r);await refresh();await loadApps()}
+  catch(e){const msg=String(e.message||e);showResult({error:msg.startsWith('cv_not_extracted')?'cv_not_extracted':msg.startsWith('unauthorized')?'unauthorized':'rule_screen_failed',detail:msg})}
+}
+window.ai=async id=>{
+  showResult({loading:true});
+  try{const r=await api('/api/ai/screen',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({application_id:id})});showResult(r);await refresh();await loadApps()}
+  catch(e){const msg=String(e.message||e);showResult({error:msg.includes('insufficient_quota')||msg.includes('credit_balance_exhausted')?'ai_quota_exhausted':msg.startsWith('cv_not_extracted')?'cv_not_extracted':'ai_request_failed',detail:msg})}
+}
 function showResult(x){renderScreeningResult(x)}
 function esc(s){return String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]))}
 async function boot(){try{const r=await api('/api/auth/me');$('#auth').classList.add('hidden');$('#app').classList.remove('hidden');$('#who').textContent=r.user.name+' · '+(r.user.company_name||'');await refresh();$('#authMsg').textContent=''}catch(e){$('#authMsg').textContent='Login/session error: '+e.message;$('#auth').classList.remove('hidden');$('#app').classList.add('hidden')}}
