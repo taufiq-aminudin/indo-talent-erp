@@ -557,7 +557,7 @@ function renderProfessionalScreeningResult(raw){
 </script>
 <h2>Screening result</h2><pre id="resultText" style="white-space:pre-wrap"></pre></div></section>
 </main></div>
-<script src="/app.js?v=625" defer></script></body></html>`));
+<script src="/app.js?v=629" defer></script></body></html>`));
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 
