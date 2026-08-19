@@ -18,6 +18,7 @@
     "OpenAI Responses API screening",
     "recruiter dashboard"
   ],
-  "version": "6.2",
-  "schema": "existing-indo-talent-db"
+  "version": "6.33",
+  "schema": "existing-indo-talent-db",
+  "release": "job-actions-screening-hardening"
 }
