@@ -7,8 +7,8 @@ APP_NAME = "AI Screening"
 
 [[d1_databases]]
 binding = "DB"
-database_name = "ai_screening"
-database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+database_name = "indo-talent-db"
+database_id = "5ad9a5b2-fdf2-4bd8-b1e9-ffc7d38ee0ae"
 [[r2_buckets]]
 binding = "CV_BUCKET"
 bucket_name = "ai-screening-cv"
