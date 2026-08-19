@@ -107,24 +107,46 @@ app.post("/api/auth/register",async c=>{
 app.post("/api/auth/login",async c=>{try{const b=await c.req.json<any>(),email=String(b.email||"").trim().toLowerCase(),password=String(b.password||"");const r=await c.env.DB.prepare("SELECT u.id,u.company_id,u.name,u.email,u.password_hash,u.role,COALESCE(cp.company_name,u.name) company_name FROM users u LEFT JOIN company_profiles cp ON cp.user_id=u.company_id WHERE u.email=? LIMIT 1").bind(email).first<any>();if(!r||!(await passwordVerify(password,r.password_hash)))return c.json({error:"invalid_credentials"},401);const u:AuthUser={id:r.id,company_id:r.company_id||r.id,name:r.name,email:r.email,role:r.role,company_name:r.company_name};await createSession(c,u);await audit(c,u,"auth.login",u.id);return c.json({user:u})}catch(e:any){return c.json({error:"login_failed",detail:String(e?.message||e)},500)}});
 app.post("/api/auth/logout",async c=>{try{const raw=cookieToken(c.req.raw);const cs=await columns(c.env.DB,"sessions");const tokenCol=cs.has("id")?"id":cs.has("session_id")?"session_id":cs.has("token_hash")?"token_hash":cs.has("token")?"token":null;if(raw&&tokenCol)await c.env.DB.prepare(`DELETE FROM sessions WHERE ${tokenCol}=?`).bind(await sha256(raw)).run();c.header("Set-Cookie",setCookie("",0));return c.json({ok:true})}catch{return c.json({ok:true})}});
 app.get("/api/auth/me",requireAuth,c=>c.json({user:c.get("user")}));
-for(const p of ["/api/jobs","/api/candidates","/api/applications","/api/dashboard","/api/screenings/*"])app.use(p,requireAuth);
+app.get("/api/auth/status",async c=>{
+  try{
+    const u=await currentUser(c);
+    return c.json({authenticated:!!u,user:u?{id:u.id,role:u.role,company_id:u.company_id,email:u.email}:null});
+  }catch(e:any){
+    return c.json({authenticated:false,error:"auth_status_failed",detail:String(e?.message||e)},500);
+  }
+});
+for(const p of ["/api/candidates","/api/applications","/api/dashboard","/api/screenings/*"])app.use(p,requireAuth);
 app.get("/api/dashboard",async c=>{try{const u=c.get("user") as AuthUser;if(!u.company_id)return c.json({error:"company_id_missing"},403);const [j,ca,a]=await Promise.all([c.env.DB.prepare("SELECT COUNT(*) count FROM jobs WHERE company_id=?").bind(u.company_id).first<any>(),c.env.DB.prepare("SELECT COUNT(*) count FROM users WHERE company_id=? AND role='candidate'").bind(u.company_id).first<any>(),c.env.DB.prepare("SELECT COUNT(*) count FROM applications a JOIN jobs j ON j.id=a.job_id WHERE j.company_id=?").bind(u.company_id).first<any>()]);return c.json({jobs:Number(j?.count||0),candidates:Number(ca?.count||0),applications:Number(a?.count||0),strong_matches:0})}catch(e:any){return c.json({error:"dashboard_query_failed",detail:String(e?.message||e)},500)}});
-app.get("/api/jobs",async c=>{const u=c.get("user") as AuthUser;return c.json((await c.env.DB.prepare("SELECT id,title,location,salary,description,status,created_at FROM jobs WHERE company_id=? ORDER BY created_at DESC").bind(u.company_id).all()).results)});
-app.post("/api/jobs",async c=>{
+app.get("/api/jobs",requireAuth,async c=>{
   try{
     const u=c.get("user") as AuthUser;
     if(!u?.company_id)return c.json({error:"company_context_missing"},400);
-    if(u.role!=="company"&&u.role!=="admin")return c.json({error:"company_role_required"},403);
+    const rows=await c.env.DB.prepare(
+      "SELECT id,title,location,salary,description,status,created_at FROM jobs WHERE company_id=? ORDER BY created_at DESC"
+    ).bind(u.company_id).all();
+    return c.json(rows.results||[]);
+  }catch(e:any){
+    return c.json({error:"job_list_failed",detail:String(e?.message||e)},500);
+  }
+});
+app.post("/api/jobs",requireAuth,async c=>{
+  try{
+    const u=c.get("user") as AuthUser;
+    if(!u)return c.json({error:"unauthorized",stage:"job_auth"},401);
+    if(!u.company_id)return c.json({error:"company_context_missing",stage:"job_auth"},400);
+    if(u.role!=="company"&&u.role!=="admin")return c.json({error:"company_role_required",stage:"job_auth",role:u.role},403);
+
     const b=await c.req.json<any>();
     const title=String(b.title||"").trim();
     const location=String(b.location||"").trim();
     const salary=String(b.salary||"").trim();
     const description=String(b.description||"").trim();
-    const requirements=Array.isArray(b.requirements)?b.requirements.map((x:any)=>String(x).trim()).filter(Boolean):[];
+    const requirements=Array.isArray(b.requirements)
+      ? b.requirements.map((x:any)=>String(x).trim()).filter(Boolean)
+      : [];
+
     if(!title||!description)return c.json({error:"title,description_required"},400);
 
-    // The existing ERP `jobs` table has no requirements column.
-    // Preserve the submitted requirements in the description without changing schema.
     const finalDescription=requirements.length
       ? description+"\n\nRequired skills:\n"+requirements.map((x:string)=>"- "+x).join("\n")
       : description;
