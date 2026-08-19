@@ -1,0 +1,12 @@
+{
+  "source": "PT_SUI_AI_Screening_V5(1).zip",
+  "target": "AI Screening SaaS V6 Cloudflare Foundation",
+  "custom_domain": "screening.indo-talent.my.id",
+  "hosting": [
+    "GitHub",
+    "Cloudflare Workers",
+    "Cloudflare D1",
+    "Cloudflare R2"
+  ],
+  "status": "foundation"
+}

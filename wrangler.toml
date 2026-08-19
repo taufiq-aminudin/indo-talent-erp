@@ -1,0 +1,18 @@
+name = "ai-screening-saas"
+main = "src/index.ts"
+compatibility_date = "2026-08-19"
+
+[vars]
+APP_NAME = "AI Screening"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "ai_screening"
+database_id = "REPLACE_WITH_YOUR_D1_DATABASE_ID"
+
+[[r2_buckets]]
+binding = "CV_BUCKET"
+bucket_name = "ai-screening-cv"
+
+[observability]
+enabled = true
