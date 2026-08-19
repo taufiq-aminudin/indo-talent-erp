@@ -110,7 +110,36 @@ app.get("/api/auth/me",requireAuth,c=>c.json({user:c.get("user")}));
 for(const p of ["/api/jobs","/api/candidates","/api/applications","/api/dashboard","/api/screenings/*"])app.use(p,requireAuth);
 app.get("/api/dashboard",async c=>{try{const u=c.get("user") as AuthUser;if(!u.company_id)return c.json({error:"company_id_missing"},403);const [j,ca,a]=await Promise.all([c.env.DB.prepare("SELECT COUNT(*) count FROM jobs WHERE company_id=?").bind(u.company_id).first<any>(),c.env.DB.prepare("SELECT COUNT(*) count FROM users WHERE company_id=? AND role='candidate'").bind(u.company_id).first<any>(),c.env.DB.prepare("SELECT COUNT(*) count FROM applications a JOIN jobs j ON j.id=a.job_id WHERE j.company_id=?").bind(u.company_id).first<any>()]);return c.json({jobs:Number(j?.count||0),candidates:Number(ca?.count||0),applications:Number(a?.count||0),strong_matches:0})}catch(e:any){return c.json({error:"dashboard_query_failed",detail:String(e?.message||e)},500)}});
 app.get("/api/jobs",async c=>{const u=c.get("user") as AuthUser;return c.json((await c.env.DB.prepare("SELECT id,title,location,salary,description,status,created_at FROM jobs WHERE company_id=? ORDER BY created_at DESC").bind(u.company_id).all()).results)});
-app.post("/api/jobs",async c=>{const u=c.get("user") as AuthUser,b=await c.req.json<any>();if(!String(b.title||"").trim()||!String(b.description||"").trim())return c.json({error:"title,description_required"},400);const jid=id();await c.env.DB.prepare("INSERT INTO jobs(id,company_id,title,location,salary,description,status,created_at) VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP)").bind(jid,u.company_id,String(b.title).trim(),String(b.location||"").trim(),String(b.salary||"").trim(),String(b.description).trim(),"open").run();await audit(c,u,"job.create",jid);return c.json({id:jid},201)});
+app.post("/api/jobs",async c=>{
+  try{
+    const u=c.get("user") as AuthUser;
+    if(!u?.company_id)return c.json({error:"company_context_missing"},400);
+    if(u.role!=="company"&&u.role!=="admin")return c.json({error:"company_role_required"},403);
+    const b=await c.req.json<any>();
+    const title=String(b.title||"").trim();
+    const location=String(b.location||"").trim();
+    const salary=String(b.salary||"").trim();
+    const description=String(b.description||"").trim();
+    const requirements=Array.isArray(b.requirements)?b.requirements.map((x:any)=>String(x).trim()).filter(Boolean):[];
+    if(!title||!description)return c.json({error:"title,description_required"},400);
+
+    // The existing ERP `jobs` table has no requirements column.
+    // Preserve the submitted requirements in the description without changing schema.
+    const finalDescription=requirements.length
+      ? description+"\n\nRequired skills:\n"+requirements.map((x:string)=>"- "+x).join("\n")
+      : description;
+
+    const jid=id();
+    await c.env.DB.prepare(
+      "INSERT INTO jobs(id,company_id,title,location,salary,description,status,created_at) VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP)"
+    ).bind(jid,u.company_id,title,location,salary,finalDescription,"open").run();
+
+    await audit(c,u,"job.create",jid);
+    return c.json({ok:true,id:jid,title},201);
+  }catch(e:any){
+    return c.json({error:"job_create_failed",detail:String(e?.message||e)},500);
+  }
+});
 app.get("/api/candidates",async c=>{const u=c.get("user") as AuthUser;return c.json((await c.env.DB.prepare(`SELECT u.id,u.name,u.email,u.phone,cp.cv_url,cp.full_name,cp.headline,cp.summary FROM users u LEFT JOIN candidate_profiles cp ON cp.user_id=u.id WHERE u.company_id=? AND u.role='candidate' ORDER BY u.created_at DESC`).bind(u.company_id).all()).results)});
 app.post("/api/candidates/upload",async c=>{try{const u=c.get("user") as AuthUser,f=await c.req.formData(),file=f.get("file"),name=String(f.get("name")||"").trim(),email0=String(f.get("email")||"").trim().toLowerCase(),phone=String(f.get("phone")||"").trim(),jobId=String(f.get("job_id")||"").trim();if(!(file instanceof File)||!name)return c.json({error:"file,name_required"},400);if(file.size>10*1024*1024)return c.json({error:"file_too_large_max_10mb"},413);const email=email0||`candidate-${crypto.randomUUID()}@internal.invalid`;if(await c.env.DB.prepare("SELECT id FROM users WHERE email=? LIMIT 1").bind(email).first())return c.json({error:"candidate_email_already_exists"},409);const uid=id(),key=`${u.company_id}/candidates/${uid}/${file.name.replace(/[^a-zA-Z0-9._-]+/g,"_").slice(0,160)||"cv"}`;await c.env.CV_BUCKET.put(key,file.stream(),{httpMetadata:{contentType:file.type||"application/octet-stream"}});const text=file.type==="text/plain"?(await file.text()).slice(0,100000):"";await c.env.DB.batch([c.env.DB.prepare("INSERT INTO users(id,role,email,password_hash,name,phone,status,company_id,approval_status) VALUES(?,?,?,?,?,?,?,?,?)").bind(uid,"candidate",email,"!cv-upload-no-login!",name,phone,"active",u.company_id,"approved"),c.env.DB.prepare("INSERT INTO candidate_profiles(user_id,phone,full_name,cv_url,summary) VALUES(?,?,?,?,?)").bind(uid,phone,name,key,text)]);if(jobId){const j=await c.env.DB.prepare("SELECT id FROM jobs WHERE id=? AND company_id=?").bind(jobId,u.company_id).first();if(j)await createApplication(c,u,jobId,uid)}await audit(c,u,"candidate.upload",uid);return c.json({id:uid,object_key:key,filename:file.name,extraction_status:file.type==="text/plain"?"complete":"pending"},201)}catch(e:any){return c.json({error:"candidate_upload_failed",detail:String(e?.message||e)},500)}});
 app.get("/api/applications",async c=>{try{const u=c.get("user") as AuthUser,m=await appMeta(c.env.DB);if(!m.candidate)return c.json({error:"applications_missing_candidate_key"},500);const tenant=m.tenant?`AND a.${m.tenant}=?`:"";const sql=`SELECT a.id,a.status,a.score,j.id job_id,j.title job_title,cu.id candidate_id,cu.name candidate_name,cu.email candidate_email,cp.cv_url FROM applications a JOIN jobs j ON j.id=a.job_id JOIN users cu ON cu.id=a.${m.candidate} LEFT JOIN candidate_profiles cp ON cp.user_id=cu.id WHERE j.company_id=? ${tenant} ORDER BY a.rowid DESC`;const params=m.tenant?[u.company_id,u.company_id]:[u.company_id];return c.json((await c.env.DB.prepare(sql).bind(...params).all()).results)}catch(e:any){return c.json({error:"applications_query_failed",detail:String(e?.message||e)},500)}});
@@ -124,7 +153,7 @@ app.get("/", (c) => c.html(`<!doctype html>
 <div id="auth" class="auth card"><div class="brand"><img src="/logo.png" onerror="this.style.display='none'"><span>${c.env.APP_NAME}</span></div><h2 id="authTitle">Sign in</h2><p class="muted">Secure recruiter workspace with tenant isolation.</p><form id="authForm"><div id="orgField" class="hidden"><label>Organization</label><input class="input" id="org" autocomplete="organization"></div><label>Name</label><input class="input" id="name" autocomplete="name"><label>Email</label><input class="input" id="email" type="email" autocomplete="email" required><label>Password</label><input class="input" id="password" type="password" minlength="10" autocomplete="current-password" required><button class="btn" id="authBtn">Sign in</button></form><p><button class="btn secondary" id="toggleAuth">Create an organization</button></p><div id="authMsg" class="muted"></div></div>
 <div id="app" class="hidden"><header><div class="brand"><img src="/logo.png" onerror="this.style.display='none'"><span>${c.env.APP_NAME}</span></div><div><span id="who" class="muted"></span> <button class="btn secondary" id="logout">Logout</button></div></header><main><div class="tabs"><button data-tab="overview">Overview</button><button class="secondary" data-tab="jobs">Jobs</button><button class="secondary" data-tab="candidates">Candidates</button><button class="secondary" data-tab="applications">Screening</button></div>
 <section id="overview" class="tab"><div class="grid"><div class="card metric">Jobs<b id="mJobs">0</b></div><div class="card metric">Candidates<b id="mCandidates">0</b></div><div class="card metric">Applications<b id="mApplications">0</b></div><div class="card metric">Strong matches<b id="mStrong">0</b></div></div><div class="card"><h2>AI Screening</h2><p class="muted">Create jobs, upload CVs, attach candidates to jobs, then run rule-based or AI screening.</p></div></section>
-<section id="jobs" class="tab hidden"><div class="card"><h2>Create job</h2><form id="jobForm"><div class="row"><input class="input" id="jobTitle" placeholder="Job title" required><input class="input" id="jobLocation" placeholder="Location"></div><textarea class="input" id="jobDescription" rows="6" placeholder="Job description" required></textarea><input class="input" id="jobSkills" placeholder="Skills, comma separated"><button class="btn">Create job</button></form></div><div class="card"><h2>Jobs</h2><table class="table"><thead><tr><th>Title</th><th>Location</th><th>Created</th></tr></thead><tbody id="jobsBody"></tbody></table></div></section>
+<section id="jobs" class="tab hidden"><div class="card"><h2>Create job</h2><form id="jobForm"><div class="row"><input class="input" id="jobTitle" placeholder="Job title" required><input class="input" id="jobLocation" placeholder="Location"></div><textarea class="input" id="jobDescription" rows="6" placeholder="Job description" required></textarea><input class="input" id="jobSkills" placeholder="Skills, comma separated"><button class="btn" type="submit">Create job</button><p id="jobMsg" class="muted"></p></form></div><div class="card"><h2>Jobs</h2><table class="table"><thead><tr><th>Title</th><th>Location</th><th>Created</th></tr></thead><tbody id="jobsBody"></tbody></table></div></section>
 <section id="candidates" class="tab hidden"><div class="card"><h2>Upload CV</h2><form id="candidateForm"><div class="row"><input class="input" id="candidateName" placeholder="Candidate name" required><input class="input" id="candidateEmail" placeholder="Email"></div><div class="row"><input class="input" id="candidatePhone" placeholder="Phone"><select class="input" id="candidateJob"><option value="">Attach to job (optional)</option></select></div><input class="input" id="candidateFile" type="file" accept=".pdf,.docx,.txt" required><button class="btn">Upload candidate</button><p id="candidateMsg" class="muted"></p></form></div><div class="card"><h2>Candidates</h2><table class="table"><thead><tr><th>Name</th><th>Email</th><th>CV</th></tr></thead><tbody id="candidatesBody"></tbody></table></div></section>
 <section id="applications" class="tab hidden"><div class="card"><h2>Screening pipeline</h2><table class="table"><thead><tr><th>Candidate</th><th>Job</th><th>Score</th><th>Status</th><th>Actions</th></tr></thead><tbody id="appsBody"></tbody></table></div><div id="result" class="card hidden"><h2>Screening result</h2><pre id="resultText" style="white-space:pre-wrap"></pre></div></section>
 </main></div>
@@ -141,7 +170,24 @@ async function loadJobs(){const jobs=await api('/api/jobs');$('#jobsBody').inner
 async function loadCandidates(){const rows=await api('/api/candidates');$('#candidatesBody').innerHTML=rows.map(x=>\`<tr><td>\${esc(x.name)}</td><td>\${esc(x.email||'-')}</td><td>\${esc(x.cv_filename||'-')}</td></tr>\`).join('')}
 async function loadApps(){const rows=await api('/api/applications');$('#appsBody').innerHTML=rows.map(x=>\`<tr><td>\${esc(x.candidate_name)}</td><td>\${esc(x.job_title)}</td><td>\${x.score||0}</td><td><span class="pill">\${esc(x.status)}</span></td><td><button class="btn secondary" onclick="rule('\${x.id}')">Rule</button> <button class="btn" onclick="ai('\${x.id}')">AI</button></td></tr>\`).join('')}
 async function refresh(){const d=await api('/api/dashboard');$('#mJobs').textContent=d.jobs;$('#mCandidates').textContent=d.candidates;$('#mApplications').textContent=d.applications;$('#mStrong').textContent=d.strong_matches;await loadJobs()}
-$('#jobForm').onsubmit=async e=>{e.preventDefault();await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({title:$('#jobTitle').value,location:$('#jobLocation').value,description:$('#jobDescription').value,requirements:$('#jobSkills').value.split(',').map(x=>x.trim()).filter(Boolean)})});e.target.reset();await refresh();loadJobs()}
+$('#jobForm').onsubmit=async e=>{
+  e.preventDefault();
+  const msg=$('#jobMsg');
+  msg.textContent='Creating job...';
+  try{
+    const r=await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
+      title:$('#jobTitle').value,
+      location:$('#jobLocation').value,
+      description:$('#jobDescription').value,
+      requirements:$('#jobSkills').value.split(',').map(x=>x.trim()).filter(Boolean)
+    })});
+    e.target.reset();
+    msg.textContent='Job created successfully.';
+    await refresh();
+  }catch(err){
+    msg.textContent='Create job failed: '+err.message;
+  }
+}
 $('#candidateForm').onsubmit=async e=>{e.preventDefault();const fd=new FormData();fd.append('name',$('#candidateName').value);fd.append('email',$('#candidateEmail').value);fd.append('phone',$('#candidatePhone').value);fd.append('job_id',$('#candidateJob').value);fd.append('file',$('#candidateFile').files[0]);$('#candidateMsg').textContent='Uploading...';try{const r=await api('/api/candidates/upload',{method:'POST',body:fd});$('#candidateMsg').textContent=r.extraction_status==='pending'?'Uploaded. PDF/DOCX text extraction is the next module.':'Uploaded and text indexed.';e.target.reset();await refresh();loadCandidates()}catch(err){$('#candidateMsg').textContent=err.message}}
 window.rule=async id=>{try{const r=await api('/api/screenings/rule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({application_id:id})});showResult(r);await refresh();loadApps()}catch(e){showResult({error:e.message})}}
 window.ai=async id=>{try{const r=await api('/api/ai/screen',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({application_id:id})});showResult(r);await refresh();loadApps()}catch(e){showResult({error:e.message})}}
