@@ -25,14 +25,73 @@ async function passwordVerify(password:string,stored:string){try{const [scheme,i
 function cookieToken(req:Request){return (req.headers.get("Cookie")||"").match(/(?:^|;\s*)session=([^;]+)/)?.[1]||null}
 function setCookie(token:string,maxAge:number){return `session=${token}; Max-Age=${maxAge}; Path=/; HttpOnly; Secure; SameSite=Lax`}
 async function columns(db:D1Database,table:string){const r=await db.prepare(`PRAGMA table_info(${table})`).all<any>();return new Set((r.results||[]).map((x:any)=>String(x.name)))}
-async function createSession(c:any,u:AuthUser){const raw=b64url(crypto.getRandomValues(new Uint8Array(32)));const cs=await columns(c.env.DB,"sessions");const tokenHash=await sha256(raw);const expires=new Date(Date.now()+7*86400000).toISOString();const fields:string[]=[];const vals:any[]=[];const add=(n:string,v:any)=>{if(cs.has(n)){fields.push(n);vals.push(v)}};if(cs.has("id"))add("id",tokenHash);else if(cs.has("session_id"))add("session_id",tokenHash);else if(cs.has("token_hash"))add("token_hash",tokenHash);else if(cs.has("token"))add("token",tokenHash);add("user_id",u.id);if(cs.has("company_id"))add("company_id",u.company_id);else if(cs.has("organization_id"))add("organization_id",u.company_id);add("expires_at",expires);if(cs.has("created_at"))add("created_at",new Date().toISOString());if(!fields.includes("user_id")||!fields.some(x=>["id","session_id","token_hash","token"].includes(x)))throw new Error("sessions_schema_missing_identity_columns");await c.env.DB.prepare(`INSERT INTO sessions(${fields.join(",")}) VALUES(${fields.map(()=>"?").join(",")})`).bind(...vals).run();c.header("Set-Cookie",setCookie(raw,7*86400))}
-async function currentUser(c:any):Promise<AuthUser|null>{const raw=cookieToken(c.req.raw);if(!raw)return null;const cs=await columns(c.env.DB,"sessions");const tokenCol=cs.has("id")?"id":cs.has("session_id")?"session_id":cs.has("token_hash")?"token_hash":cs.has("token")?"token":null;if(!tokenCol||!cs.has("user_id")||!cs.has("expires_at"))return null;return await c.env.DB.prepare(`SELECT u.id,u.company_id,u.name,u.email,u.role,COALESCE(cp.company_name,u.name) company_name FROM sessions s JOIN users u ON u.id=s.user_id LEFT JOIN company_profiles cp ON cp.user_id=u.company_id WHERE s.${tokenCol}=? AND s.expires_at>CURRENT_TIMESTAMP LIMIT 1`).bind(await sha256(raw)).first<AuthUser>()}
+async function createSession(c:any,u:AuthUser){
+  const token=b64url(crypto.getRandomValues(new Uint8Array(32)));
+  const expires=new Date(Date.now()+7*86400000).toISOString();
+  await c.env.DB.prepare("INSERT INTO sessions(token,user_id,expires_at) VALUES(?,?,?)")
+    .bind(await sha256(token),u.id,expires).run();
+  c.header("Set-Cookie",setCookie(token,7*86400));
+}
+async function currentUser(c:any):Promise<AuthUser|null>{
+  const raw=cookieToken(c.req.raw);
+  if(!raw)return null;
+  const row=await c.env.DB.prepare(
+    "SELECT u.id,u.company_id,u.name,u.email,u.role,COALESCE(cp.company_name,u.name) company_name " +
+    "FROM sessions s JOIN users u ON u.id=s.user_id " +
+    "LEFT JOIN company_profiles cp ON cp.user_id=u.company_id " +
+    "WHERE s.token=? AND s.expires_at>CURRENT_TIMESTAMP LIMIT 1"
+  ).bind(await sha256(raw)).first<AuthUser>();
+  return row||null;
+}
 async function requireAuth(c:any,next:any){const u=await currentUser(c);if(!u)return c.json({error:"unauthorized"},401);c.set("user",u);await next()}
 async function audit(c:any,u:AuthUser,action:string,entityId?:string){try{const cs=await columns(c.env.DB,"admin_audit_logs");const fields:string[]=[];const vals:any[]=[];const add=(n:string,v:any)=>{if(cs.has(n)){fields.push(n);vals.push(v)}};add("id",id());add("user_id",u.id);add("action",action);add("entity_id",entityId||null);add("company_id",u.company_id);add("created_at",new Date().toISOString());if(fields.length)await c.env.DB.prepare(`INSERT INTO admin_audit_logs(${fields.join(",")}) VALUES(${fields.map(()=>"?").join(",")})`).bind(...vals).run()}catch{}}
 async function appMeta(db:D1Database){const cs=await columns(db,"applications");return {cs,candidate:cs.has("candidate_id")?"candidate_id":cs.has("user_id")?"user_id":null,tenant:cs.has("company_id")?"company_id":cs.has("organization_id")?"organization_id":null}}
 async function createApplication(c:any,u:AuthUser,jobId:string,candidateUserId:string){const m=await appMeta(c.env.DB);if(!m.candidate)throw new Error("applications_missing_candidate_key");const f=["id","job_id",m.candidate],v:any[]=[id(),jobId,candidateUserId];if(m.tenant){f.push(m.tenant);v.push(u.company_id)}if(m.cs.has("status")){f.push("status");v.push("Review")}if(m.cs.has("score")){f.push("score");v.push(0)}await c.env.DB.prepare(`INSERT INTO applications(${f.join(",")}) VALUES(${f.map(()=>"?").join(",")})`).bind(...v).run()}
 app.get("/api/health",async c=>{try{await c.env.DB.prepare("SELECT 1").first();return c.json({ok:true,app:c.env.APP_NAME,version:"v6.2-schema-aligned",database:"indo-talent-db",storage:"r2"})}catch{return c.json({ok:false,error:"database_unavailable"},503)}});
-app.post("/api/auth/register",async c=>{try{const b=await c.req.json<any>(),company=String(b.organization_name||"").trim(),name=String(b.name||"").trim(),email=String(b.email||"").trim().toLowerCase(),password=String(b.password||"");if(!company||!name||!email||password.length<10)return c.json({error:"organization_name,name,email,password_min_10_required"},400);if(await c.env.DB.prepare("SELECT id FROM users WHERE email=? LIMIT 1").bind(email).first())return c.json({error:"email_already_registered"},409);const uid=id(),hash=await passwordHash(password);await c.env.DB.batch([c.env.DB.prepare("INSERT INTO users(id,role,email,password_hash,name,status,company_id,approval_status,email_verified) VALUES(?,?,?,?,?,?,?,?,?)").bind(uid,"admin",email,hash,name,"active",uid,"approved",0),c.env.DB.prepare("INSERT INTO company_profiles(user_id,company_name,contact_name,contact_email,created_at,updated_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)").bind(uid,company,name,email)]);const u:AuthUser={id:uid,company_id:uid,name,email,role:"admin",company_name:company};await createSession(c,u);await audit(c,u,"auth.register",uid);return c.json({user:u},201)}catch(e:any){return c.json({error:"registration_failed",detail:String(e?.message||e)},500)}});
+app.post("/api/auth/register",async c=>{
+  try{
+    const b=await c.req.json<any>();
+    const company=String(b.organization_name||"").trim();
+    const name=String(b.name||"").trim();
+    const email=String(b.email||"").trim().toLowerCase();
+    const password=String(b.password||"");
+    if(!company||!name||!email||password.length<10)
+      return c.json({error:"organization_name,name,email,password_min_10_required"},400);
+    if(await c.env.DB.prepare("SELECT id FROM users WHERE email=? LIMIT 1").bind(email).first())
+      return c.json({error:"email_already_registered"},409);
+
+    const uid=id();
+    const hash=await passwordHash(password);
+
+    try{
+      await c.env.DB.prepare(
+        "INSERT INTO users(id,role,email,password_hash,name,status,company_id,approval_status,email_verified) VALUES(?,?,?,?,?,?,?,?,?)"
+      ).bind(uid,"company",email,hash,name,"active",uid,"approved",0).run();
+    }catch(e:any){
+      return c.json({error:"registration_failed",stage:"users_insert",detail:String(e?.message||e)},500);
+    }
+
+    try{
+      await c.env.DB.prepare(
+        "INSERT INTO company_profiles(user_id,company_name,contact_name,contact_email,created_at,updated_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"
+      ).bind(uid,company,name,email).run();
+    }catch(e:any){
+      await c.env.DB.prepare("DELETE FROM users WHERE id=?").bind(uid).run().catch(()=>{});
+      return c.json({error:"registration_failed",stage:"company_profile_insert",detail:String(e?.message||e)},500);
+    }
+
+    const u:AuthUser={id:uid,company_id:uid,name,email,role:"company",company_name:company};
+    try{
+      await createSession(c,u);
+    }catch(e:any){
+      return c.json({error:"registration_failed",stage:"session_insert",detail:String(e?.message||e)},500);
+    }
+    await audit(c,u,"auth.register",uid);
+    return c.json({user:u},201);
+  }catch(e:any){
+    return c.json({error:"registration_failed",stage:"request",detail:String(e?.message||e)},500);
+  }
+});
 app.post("/api/auth/login",async c=>{try{const b=await c.req.json<any>(),email=String(b.email||"").trim().toLowerCase(),password=String(b.password||"");const r=await c.env.DB.prepare("SELECT u.id,u.company_id,u.name,u.email,u.password_hash,u.role,COALESCE(cp.company_name,u.name) company_name FROM users u LEFT JOIN company_profiles cp ON cp.user_id=u.company_id WHERE u.email=? LIMIT 1").bind(email).first<any>();if(!r||!(await passwordVerify(password,r.password_hash)))return c.json({error:"invalid_credentials"},401);const u:AuthUser={id:r.id,company_id:r.company_id||r.id,name:r.name,email:r.email,role:r.role,company_name:r.company_name};await createSession(c,u);await audit(c,u,"auth.login",u.id);return c.json({user:u})}catch(e:any){return c.json({error:"login_failed",detail:String(e?.message||e)},500)}});
 app.post("/api/auth/logout",async c=>{try{const raw=cookieToken(c.req.raw);const cs=await columns(c.env.DB,"sessions");const tokenCol=cs.has("id")?"id":cs.has("session_id")?"session_id":cs.has("token_hash")?"token_hash":cs.has("token")?"token":null;if(raw&&tokenCol)await c.env.DB.prepare(`DELETE FROM sessions WHERE ${tokenCol}=?`).bind(await sha256(raw)).run();c.header("Set-Cookie",setCookie("",0));return c.json({ok:true})}catch{return c.json({ok:true})}});
 app.get("/api/auth/me",requireAuth,c=>c.json({user:c.get("user")}));
