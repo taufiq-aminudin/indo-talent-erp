@@ -69,7 +69,7 @@ async function requireAuth(c:any,next:any){
 async function audit(c:any,u:AuthUser,action:string,entityId?:string){try{const cs=await columns(c.env.DB,"admin_audit_logs");const fields:string[]=[];const vals:any[]=[];const add=(n:string,v:any)=>{if(cs.has(n)){fields.push(n);vals.push(v)}};add("id",id());add("user_id",u.id);add("action",action);add("entity_id",entityId||null);add("company_id",u.company_id);add("created_at",new Date().toISOString());if(fields.length)await c.env.DB.prepare(`INSERT INTO admin_audit_logs(${fields.join(",")}) VALUES(${fields.map(()=>"?").join(",")})`).bind(...vals).run()}catch{}}
 async function appMeta(db:D1Database){const cs=await columns(db,"applications");return {cs,candidate:cs.has("candidate_id")?"candidate_id":cs.has("user_id")?"user_id":null,tenant:cs.has("company_id")?"company_id":cs.has("organization_id")?"organization_id":null}}
 async function createApplication(c:any,u:AuthUser,jobId:string,candidateUserId:string){const m=await appMeta(c.env.DB);if(!m.candidate)throw new Error("applications_missing_candidate_key");const f=["id","job_id",m.candidate],v:any[]=[id(),jobId,candidateUserId];if(m.tenant){f.push(m.tenant);v.push(u.company_id)}if(m.cs.has("status")){f.push("status");v.push("Review")}if(m.cs.has("score")){f.push("score");v.push(0)}await c.env.DB.prepare(`INSERT INTO applications(${f.join(",")}) VALUES(${f.map(()=>"?").join(",")})`).bind(...v).run()}
-app.get("/api/health",async c=>{try{await c.env.DB.prepare("SELECT 1").first();return c.json({ok:true,app:c.env.APP_NAME,version:"v6.2-schema-aligned",database:"indo-talent-db",storage:"r2"})}catch{return c.json({ok:false,error:"database_unavailable"},503)}});
+app.get("/api/health",async c=>{try{await c.env.DB.prepare("SELECT 1").first();return c.json({ok:true,app:c.env.APP_NAME,version:"v6.32-job-management",database:"indo-talent-db",storage:"r2"})}catch{return c.json({ok:false,error:"database_unavailable"},503)}});
 app.post("/api/auth/register",async c=>{
   try{
     const b=await c.req.json<any>();
@@ -161,11 +161,54 @@ app.get("/api/jobs",async c=>{
     if(!u)return c.json({error:"unauthorized",stage:"job_auth",cookie_present:!!cookieToken(c.req.raw)},401);
     if(!u.company_id)return c.json({error:"company_context_missing"},400);
     const rows=await c.env.DB.prepare(
-      "SELECT id,title,location,salary,description,status,created_at FROM jobs WHERE company_id=? ORDER BY created_at DESC"
+      "SELECT id,title,location,salary,description,status,created_at FROM jobs WHERE company_id=? AND COALESCE(status,'open')<>'deleted' ORDER BY created_at DESC"
     ).bind(u.company_id).all();
     return c.json(rows.results||[]);
   }catch(e:any){
     return c.json({error:"job_list_failed",detail:String(e?.message||e)},500);
+  }
+});
+
+app.patch("/api/jobs/:id",async c=>{
+  try{
+    const u=await currentUser(c);
+    if(!u)return c.json({error:"unauthorized",stage:"job_auth"},401);
+    if(!u.company_id)return c.json({error:"company_context_missing"},400);
+    if(u.role!=="company"&&u.role!=="admin")return c.json({error:"company_role_required",stage:"job_auth",role:u.role},403);
+    const jid=c.req.param("id");
+    const existing=await c.env.DB.prepare("SELECT id,title,location,salary,description,status FROM jobs WHERE id=? AND company_id=? LIMIT 1").bind(jid,u.company_id).first<any>();
+    if(!existing||existing.status==='deleted')return c.json({error:"job_not_found"},404);
+    const b=await c.req.json<any>();
+    const title=String(b.title??existing.title??"").trim();
+    const location=String(b.location??existing.location??"").trim();
+    const salary=String(b.salary??existing.salary??"").trim();
+    const description=String(b.description??existing.description??"").trim();
+    const requirements=Array.isArray(b.requirements)?b.requirements.map((x:any)=>String(x).trim()).filter(Boolean):[];
+    if(!title||!description)return c.json({error:"title,description_required"},400);
+    const finalDescription=description.replace(/\n\nRequired skills:\n(?:- .*\n?)+$/i,"").trim() + (requirements.length?"\n\nRequired skills:\n"+requirements.map((x:string)=>"- "+x).join("\n"):"");
+    await c.env.DB.prepare("UPDATE jobs SET title=?,location=?,salary=?,description=? WHERE id=? AND company_id=?").bind(title,location,salary,finalDescription,jid,u.company_id).run();
+    await audit(c,u,"job.update",jid);
+    return c.json({ok:true,id:jid,title,location,salary,description:finalDescription,status:existing.status||'open'});
+  }catch(e:any){
+    return c.json({error:"job_update_failed",detail:String(e?.message||e)},500);
+  }
+});
+
+app.delete("/api/jobs/:id",async c=>{
+  try{
+    const u=await currentUser(c);
+    if(!u)return c.json({error:"unauthorized",stage:"job_auth"},401);
+    if(!u.company_id)return c.json({error:"company_context_missing"},400);
+    if(u.role!=="company"&&u.role!=="admin")return c.json({error:"company_role_required",stage:"job_auth",role:u.role},403);
+    const jid=c.req.param("id");
+    const existing=await c.env.DB.prepare("SELECT id,title,status FROM jobs WHERE id=? AND company_id=? LIMIT 1").bind(jid,u.company_id).first<any>();
+    if(!existing||existing.status==='deleted')return c.json({error:"job_not_found"},404);
+    // Soft delete: keep applications/screening history intact while removing the job from the active workspace.
+    await c.env.DB.prepare("UPDATE jobs SET status='deleted' WHERE id=? AND company_id=?").bind(jid,u.company_id).run();
+    await audit(c,u,"job.delete",jid);
+    return c.json({ok:true,id:jid,deleted:true});
+  }catch(e:any){
+    return c.json({error:"job_delete_failed",detail:String(e?.message||e)},500);
   }
 });
 
@@ -586,8 +629,8 @@ app.get("/", (c) => c.html(`<!doctype html>
 </style></head><body>
 <div id="auth" class="auth card"><div class="brand"><img src="/logo.png" onerror="this.style.display='none'"><span>${c.env.APP_NAME}</span></div><h2 id="authTitle">Sign in</h2><p class="muted">Secure recruiter workspace with tenant isolation.</p><form id="authForm"><div id="orgField" class="hidden"><label>Organization</label><input class="input" id="org" autocomplete="organization"></div><label>Name</label><input class="input" id="name" autocomplete="name"><label>Email</label><input class="input" id="email" type="email" autocomplete="email" required><label>Password</label><input class="input" id="password" type="password" minlength="10" autocomplete="current-password" required><button class="btn" id="authBtn">Sign in</button></form><p><button class="btn secondary" id="toggleAuth">Create an organization</button></p><div id="authMsg" class="muted"></div></div>
 <div id="app" class="hidden"><header><div class="brand"><img src="/logo.png" onerror="this.style.display='none'"><span>${c.env.APP_NAME}</span></div><div><span id="who" class="muted"></span> <button class="btn secondary" id="logout">Logout</button></div></header><main><div class="tabs"><button data-tab="overview">Overview</button><button class="secondary" data-tab="jobs">Jobs</button><button class="secondary" data-tab="candidates">Candidates</button><button class="secondary" data-tab="applications">Screening</button></div>
-<section id="overview" class="tab"><div class="grid"><div class="card metric">Jobs<b id="mJobs">0</b></div><div class="card metric">Candidates<b id="mCandidates">0</b></div><div class="card metric">Applications<b id="mApplications">0</b></div><div class="card metric">Strong matches<b id="mStrong">0</b></div></div><div class="card"><h2>AI Screening</h2><p class="muted">Create jobs, upload CVs, attach candidates to jobs, then run rule-based or AI screening.</p></div></section>
-<section id="jobs" class="tab hidden"><div class="card"><h2>Create job</h2><form id="jobForm"><div class="row"><input class="input" id="jobTitle" placeholder="Job title" required><input class="input" id="jobLocation" placeholder="Location"></div><textarea class="input" id="jobDescription" rows="6" placeholder="Job description" required></textarea><input class="input" id="jobSkills" placeholder="Skills, comma separated"><button class="btn" type="submit">Create job</button><p id="jobMsg" class="muted"></p></form></div><div class="card"><h2>Jobs</h2><table class="table"><thead><tr><th>Title</th><th>Location</th><th>Created</th></tr></thead><tbody id="jobsBody"></tbody></table></div></section>
+<section id="overview" class="tab"><div class="grid"><div class="card metric">Jobs<b id="mJobs">0</b></div><div class="card metric">Candidates<b id="mCandidates">0</b></div><div class="card metric">Applications<b id="mApplications">0</b></div><div class="card metric">Strong matches<b id="mStrong">0</b></div></div><div class="card"><div class="section-head"><div><h2>AI Screening</h2><p class="muted">Create jobs, manage positions, upload CVs, attach candidates to jobs, then run rule-based or AI screening.</p></div><button class="btn" type="button" id="manageJobsBtn">Manage jobs</button></div></div></section>
+<section id="jobs" class="tab hidden"><div class="card"><div class="section-head"><div><h2 id="jobFormTitle">Create job</h2><p class="muted">Create a position, then manage it from the Jobs dashboard.</p></div><button class="btn secondary hidden" type="button" id="cancelJobEdit">Cancel edit</button></div><form id="jobForm"><input type="hidden" id="editingJobId"><div class="row"><input class="input" id="jobTitle" placeholder="Job title" required><input class="input" id="jobLocation" placeholder="Location"></div><input class="input" id="jobSalary" placeholder="Salary / range (optional)"><textarea class="input" id="jobDescription" rows="6" placeholder="Job description" required></textarea><input class="input" id="jobSkills" placeholder="Required skills, comma separated"><div class="form-actions"><button class="btn" id="jobSubmitBtn" type="submit">Create job</button><button class="btn secondary hidden" id="jobResetBtn" type="button">Clear form</button></div><p id="jobMsg" class="muted"></p></form></div><div class="card"><div class="section-head"><div><h2>Jobs</h2><p class="muted">Edit or remove positions without losing existing screening history.</p></div><button class="btn secondary" type="button" id="refreshJobs">Refresh</button></div><div class="table-wrap"><table class="table"><thead><tr><th>Title</th><th>Location</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody id="jobsBody"></tbody></table></div></div></section>
 <section id="candidates" class="tab hidden"><div class="card"><h2>Upload CV</h2><p class="muted">Pilih satu atau banyak CV, atau satu folder. CV diproses satu per satu agar upload banyak file tidak macet. Nama, email, dan nomor HP tidak diperlukan.</p><form id="candidateForm"><div class="row"><select class="input" id="candidateJob" required><option value="">Select job position</option></select><div class="upload-options"><label class="upload-option"><span>📄 Upload file(s)</span><input class="input" id="candidateFiles" type="file" accept=".pdf,.docx,.txt" multiple></label><label class="upload-option"><span>📁 Upload folder</span><input class="input" id="candidateFolder" type="file" accept=".pdf,.docx,.txt" multiple webkitdirectory directory></label></div></div><button class="btn">Upload CVs</button><p id="candidateMsg" class="muted"></p></form></div><div class="card"><h2>Candidate Screening Pool</h2><table class="table"><thead><tr><th>CV</th><th>Job</th><th>Score</th><th>Status</th></tr></thead><tbody id="candidatesBody"></tbody></table></div></section>
 <section id="applications" class="tab hidden"><div class="card"><h2>Screening pipeline</h2><table class="table"><thead><tr><th>Candidate</th><th>Job</th><th>Score</th><th>Status</th><th>Actions</th></tr></thead><tbody id="appsBody"></tbody></table></div><div id="result" class="card hidden">
 <style>
@@ -652,7 +695,9 @@ function renderProfessionalScreeningResult(raw){
 </script>
 <h2>Screening result</h2><div id="resultText"></div></div></section>
 </main></div>
-<script src="/app.js?v=631" defer></script></body></html>`));
+<style>
+.section-head{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:14px}.section-head h2{margin-bottom:4px}.form-actions{display:flex;gap:8px;align-items:center;margin-top:12px}.table-wrap{overflow:auto}.job-actions{display:flex;gap:7px;flex-wrap:wrap}.job-action{white-space:nowrap}.job-status{display:inline-flex;padding:5px 9px;border-radius:999px;background:#eef4ff;color:#1459c7;font-size:12px;font-weight:700}.job-status.closed{background:#f1f5f9;color:#64748b}.job-empty{text-align:center;color:#94a3b8;padding:28px}.job-danger{color:#b91c1c!important;border-color:#fecaca!important;background:#fff7f7!important}@media(max-width:700px){.section-head{align-items:flex-start;flex-direction:column}.job-actions{flex-direction:column;align-items:stretch}.job-action{width:100%}}</style>
+<script src="/app.js?v=632" defer></script></body></html>`));
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 
