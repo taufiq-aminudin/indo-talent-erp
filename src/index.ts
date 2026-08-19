@@ -512,7 +512,7 @@ async function loadApps(){
     const rows=await api('/api/applications');
     $('#appsBody').innerHTML=rows.map(x=>{
       const score=x.screening_score==null?'-':x.screening_score;
-      return '<tr><td>'+esc(x.candidate_name||'CV Candidate')+'</td><td>'+esc(x.job_title||'-')+'</td><td><strong>'+score+'</strong></td><td><span class="pill">'+esc(x.status||'Review')+'</span></td><td><button type="button" class="btn secondary" onclick="extractCv(\\''+x.id+'\\')">Extract CV</button> <button type="button" class="btn secondary" onclick="rule(\\''+x.id+'\\')">Rule</button> <button type="button" class="btn" onclick="ai(\\''+x.id+'\\')">AI Screen</button></td></tr>';
+      return '<tr><td>'+esc(x.candidate_name||'CV Candidate')+'</td><td>'+esc(x.job_title||'-')+'</td><td><strong>'+score+'</strong></td><td><span class="pill">'+esc(x.status||'Review')+'</span></td><td><button type="button" class="btn secondary" onclick="extractCv(\''+x.id+'\')">Extract CV</button> <button type="button" class="btn secondary" onclick="rule(\''+x.id+'\')">Rule</button> <button type="button" class="btn" onclick="ai(\''+x.id+'\')">AI Screen</button></td></tr>';
     }).join('');
   }catch(e){
     $('#appsBody').innerHTML='<tr><td colspan="5">Screening load failed: '+esc(e.message)+'</td></tr>';
