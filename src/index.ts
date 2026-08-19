@@ -325,7 +325,7 @@ app.post("/api/screenings/rule",async c=>{
     const m=await appMeta(c.env.DB);
     if(!m.candidate)return c.json({error:"applications_missing_candidate_key"},500);
     const r=await c.env.DB.prepare(
-      `SELECT a.id,j.title,j.description,cu.name,cp.skills,cp.experience_years,cp.summary
+      `SELECT a.id,j.title,j.description,cu.name,cp.skills,cp.experience_years,cp.summary,cp.current_position,cp.education
        FROM applications a JOIN jobs j ON j.id=a.job_id
        JOIN users cu ON cu.id=a.${m.candidate}
        LEFT JOIN candidate_profiles cp ON cp.user_id=cu.id
@@ -333,25 +333,48 @@ app.post("/api/screenings/rule",async c=>{
     ).bind(b.application_id,u.company_id).first<any>();
     if(!r)return c.json({error:"application_not_found"},404);
 
-    let skills:string[]=[];
-    if(r.skills){
-      try{skills=JSON.parse(r.skills)}catch{skills=String(r.skills).split(/[,|]/).map((x:string)=>x.trim()).filter(Boolean)}
-    }
-    const profile=String(r.summary||"").toLowerCase();
-    const hits=skills.filter(s=>profile.includes(String(s).toLowerCase()));
-    const score=skills.length?Math.round(hits.length/skills.length*100):(Number(r.experience_years||0)>0?70:50);
+    const jobText=(String(r.title||"")+" "+String(r.description||"")).toLowerCase();
+    const profileText=(String(r.summary||"")+" "+String(r.current_position||"")+" "+String(r.skills||"")+" "+String(r.education||"")).toLowerCase();
+
+    // Transparent keyword scoring. These are intentionally job-relevant only.
+    const stop=new Set(["and","the","for","with","from","this","that","yang","dan","untuk","dengan","dari","atau","pada","dalam","sebagai","manager","finance"]);
+    const rawTokens=jobText.match(/[a-zA-Z][a-zA-Z0-9+#.-]{2,}/g)||[];
+    const keywords=[...new Set(rawTokens.map((x:string)=>x.toLowerCase()).filter((x:string)=>!stop.has(x)))];
+    const hits=keywords.filter((x:string)=>profileText.includes(x));
+    const missing=keywords.filter((x:string)=>!hits.includes(x));
+    const skillMatch=keywords.length?Math.round(hits.length/keywords.length*50):0;
+
+    const exp=Number(r.experience_years||0);
+    const experienceScore=Math.min(25,Math.round((Math.min(exp,5)/5)*25));
+    const titleTokens=(String(r.title||"").toLowerCase().match(/[a-zA-Z][a-zA-Z0-9+#.-]{2,}/g)||[]).filter((x:string)=>!stop.has(x));
+    const positionHits=titleTokens.filter((x:string)=>profileText.includes(x));
+    const roleScore=titleTokens.length?Math.round(positionHits.length/titleTokens.length*15):0;
+    const completeness=[r.summary,r.current_position,r.education,r.skills].filter((x:any)=>String(x||"").trim()).length;
+    const completenessScore=Math.round((completeness/4)*10);
+    const score=Math.max(0,Math.min(100,skillMatch+experienceScore+roleScore+completenessScore));
     const status=score>=85?"Strong Match":score>=70?"Potential Match":"Low Match";
+
+    const breakdown={
+      skills_match:{score:skillMatch,max:50},
+      experience:{score:experienceScore,max:25},
+      role_relevance:{score:roleScore,max:15},
+      profile_completeness:{score:completenessScore,max:10}
+    };
+
     if(m.cs.has("ai_score")){
       await c.env.DB.prepare(
         "UPDATE applications SET ai_score=?,status=?,ai_recommendation=?,ai_summary=?,ai_matched_skills=?,ai_missing_skills=?,ai_screened_at=CURRENT_TIMESTAMP WHERE id=?"
-      ).bind(score,status,"Rule-based screening",`Rule-based screening for ${r.title}.`,JSON.stringify(hits),JSON.stringify(skills.filter(s=>!hits.includes(s))),b.application_id).run();
+      ).bind(score,status,"Rule-based screening",`Transparent rule-based screening for ${r.title}.`,JSON.stringify(hits.slice(0,30)),JSON.stringify(missing.slice(0,30)),b.application_id).run();
     }else if(m.cs.has("score")){
       await c.env.DB.prepare("UPDATE applications SET score=?,status=? WHERE id=?").bind(score,status,b.application_id).run();
     }else if(m.cs.has("status")){
       await c.env.DB.prepare("UPDATE applications SET status=? WHERE id=?").bind(status,b.application_id).run();
     }
     await audit(c,u,"screening.rule",b.application_id);
-    return c.json({overall_score:score,status,matched_skills:hits,missing_skills:skills.filter(s=>!hits.includes(s)),note:"Rule-based screening; recruiter makes the final decision."});
+    return c.json({
+      overall_score:score,status,matched_skills:hits.slice(0,30),missing_skills:missing.slice(0,30),
+      breakdown,note:"Rule-based screening. Score is calculated from job/CV evidence; recruiter makes the final decision."
+    });
   }catch(e:any){
     return c.json({error:"rule_screen_failed",detail:String(e?.message||e)},500);
   }
@@ -555,9 +578,54 @@ function renderProfessionalScreeningResult(raw){
   host.innerHTML='<div class="ai-result-card"><div class="ai-result-head"><div><h2 class="ai-result-title">AI Screening Result</h2><div class="ai-result-sub">Candidate assessment</div></div><span class="ai-status">'+screenEsc(status)+'</span></div><div class="ai-result-body"><div class="ai-grid"><div><div class="ai-score">'+screenEsc(score)+'<small> / 100</small></div><div class="ai-result-sub">Overall score</div></div><div class="ai-note">'+screenEsc(summary)+'</div></div><div class="ai-section"><h3>Matched skills</h3><div class="ai-chips">'+screenChips(d?.matched_skills)+'</div></div><div class="ai-section"><h3>Skills to review</h3><div class="ai-chips">'+screenChips(d?.missing_skills)+'</div></div></div></div>';
 }
 </script>
-<h2>Screening result</h2><pre id="resultText" style="white-space:pre-wrap"></pre></div></section>
+
+<style>
+.sc-pro{border:1px solid #d9e2ee;border-radius:16px;background:#fff;box-shadow:0 8px 28px rgba(15,23,42,.07);overflow:hidden}
+.sc-pro-head{padding:24px 26px;border-bottom:1px solid #e7edf5;display:flex;justify-content:space-between;align-items:center;gap:20px}
+.sc-kicker{font:700 11px/1 ui-monospace,SFMono-Regular,Menlo,monospace;letter-spacing:.14em;text-transform:uppercase;color:#64748b}
+.sc-title{margin:7px 0 0;color:#102a43;font-size:24px;font-weight:750}.sc-sub{margin-top:5px;color:#64748b;font-size:13px}
+.sc-score{min-width:130px;padding:14px 18px;border:1px solid #dbe5f0;border-radius:12px;text-align:center;background:#f8fafc}
+.sc-score strong{font-size:34px;color:#0f2747}.sc-score span{color:#64748b;font-size:13px;font-weight:600}
+.sc-body{padding:24px 26px}.sc-row{display:flex;align-items:center;gap:12px}.sc-status{display:inline-flex;padding:6px 11px;border-radius:999px;font-size:12px;font-weight:700;background:#eef4ff;color:#1459c7}
+.sc-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:20px}.sc-panel{border:1px solid #e1e8f0;border-radius:12px;padding:16px;background:#fbfcfe}.sc-panel h3{margin:0 0 12px;font-size:13px;color:#183b61}.sc-chip{display:inline-block;padding:6px 9px;margin:0 6px 6px 0;border:1px solid #dbe4ee;border-radius:999px;background:#fff;color:#334155;font-size:12px}
+.sc-break{margin-top:20px;border:1px solid #e1e8f0;border-radius:12px;overflow:hidden}.sc-break-title{padding:14px 16px;background:#f8fafc;border-bottom:1px solid #e5ebf2;font-size:14px;font-weight:700;color:#17365d}
+.sc-criterion{display:grid;grid-template-columns:180px 1fr 70px;gap:12px;align-items:center;padding:12px 16px;border-bottom:1px solid #edf1f5;font-size:13px}.sc-criterion:last-child{border-bottom:0}.sc-bar{height:7px;border-radius:99px;background:#e9eef5;overflow:hidden}.sc-bar i{display:block;height:100%;border-radius:99px;background:#1769e0}.sc-points{text-align:right;font-weight:700;color:#17365d}
+.sc-note{margin-top:18px;padding:13px 15px;border-radius:10px;background:#f8fafc;border:1px solid #e1e8f0;color:#52657a;font-size:12px;line-height:1.55}
+.sc-error{border-color:#fecaca}.sc-error .sc-pro-head{background:#fff7f7;border-bottom-color:#fee2e2}.sc-error .sc-title{color:#991b1b}.sc-errorbox{padding:16px;border:1px solid #fecaca;border-radius:10px;background:#fff7f7;color:#7f1d1d;font-size:13px;line-height:1.6}
+@media(max-width:700px){.sc-pro-head{align-items:flex-start}.sc-grid{grid-template-columns:1fr}.sc-criterion{grid-template-columns:1fr}.sc-points{text-align:left}}
+</style>
+<script>
+function scEsc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+function scChips(v){const a=Array.isArray(v)?v:[];return a.length?a.map(x=>'<span class="sc-chip">'+scEsc(x)+'</span>').join(''):'<span style="color:#94a3b8;font-size:12px">No evidence identified</span>'}
+function scCriterion(name,b){
+ const s=Number(b?.score||0),m=Number(b?.max||0),pct=m?Math.max(0,Math.min(100,s/m*100)):0;
+ return '<div class="sc-criterion"><strong>'+scEsc(name)+'</strong><div class="sc-bar"><i style="width:'+pct+'%"></i></div><div class="sc-points">'+s+' / '+m+'</div></div>';
+}
+function renderProfessionalScreeningResult(raw){
+ const host=document.querySelector('#screening-result'); if(!host)return;
+ let d=raw;if(typeof raw==='string'){try{d=JSON.parse(raw)}catch{d={error:raw}}}
+ if(d&&d.error){
+  const code=String(d.error),detail=String(d.detail||'');
+  let title='AI screening temporarily unavailable',msg='The screening service could not complete this request.';
+  if(code==='cv_not_extracted'){title='CV extraction required';msg='Extract the CV before running AI Screening.'}
+  if(code==='ai_not_configured'){title='AI service not configured';msg='The AI provider is not configured for this workspace.'}
+  if(code==='cv_extraction_failed'){title='CV extraction could not be completed';msg='The CV could not be processed. Check AI credits/quota and retry.'}
+  host.innerHTML='<div class="sc-pro sc-error"><div class="sc-pro-head"><div><div class="sc-kicker">SCREENING STATUS</div><h2 class="sc-title">'+scEsc(title)+'</h2><div class="sc-sub">No candidate score was changed</div></div><div class="sc-score">!</div></div><div class="sc-body"><div class="sc-errorbox">'+scEsc(msg)+(detail?'<br><br><small>'+scEsc(detail)+'</small>':'')+'</div></div></div>';return;
+ }
+ const score=Number(d?.overall_score??d?.score??0),status=String(d?.status||'Screened');
+ const b=d?.breakdown;
+ const hasBreak=b&&typeof b==='object';
+ const method=hasBreak?'Rule-based scoring':'AI model assessment';
+ let breakdown=hasBreak?'<div class="sc-break"><div class="sc-break-title">Score breakdown · '+scEsc(method)+'</div>'+
+ scCriterion('Skills match',b.skills_match)+scCriterion('Experience',b.experience)+scCriterion('Role relevance',b.role_relevance)+scCriterion('Profile completeness',b.profile_completeness)+'</div>':
+ '<div class="sc-note"><strong>How the score is produced</strong><br>The AI assessment evaluates job-relevant skills, experience, role relevance, achievements and the evidence available in the CV against the selected job. The model returns a score from 0–100.</div>';
+ const summary=String(d?.summary||d?.note||'Screening completed.').replace(/^Rule-based screening.*$/,'Rule-based screening based on job/CV evidence.');
+ host.innerHTML='<div class="sc-pro"><div class="sc-pro-head"><div><div class="sc-kicker">AI SCREENING RESULT</div><h2 class="sc-title">Candidate assessment</h2><div class="sc-sub">'+scEsc(method)+'</div></div><div class="sc-score"><strong>'+scEsc(score)+'</strong><br><span>/ 100</span></div></div><div class="sc-body"><div class="sc-row"><span class="sc-status">'+scEsc(status)+'</span></div><div class="sc-grid"><div class="sc-panel"><h3>Matched evidence</h3>'+scChips(d?.matched_skills)+'</div><div class="sc-panel"><h3>Areas to review</h3>'+scChips(d?.missing_skills)+'</div></div>'+breakdown+'<div class="sc-note">'+scEsc(summary)+'</div></div></div>';
+}
+</script>
+<h2>Screening result</h2><div id="resultText"></div></div></section>
 </main></div>
-<script src="/app.js?v=629" defer></script></body></html>`));
+<script src="/app.js?v=630" defer></script></body></html>`));
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 
