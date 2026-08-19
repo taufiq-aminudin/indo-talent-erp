@@ -183,13 +183,13 @@ app.get("/api/candidates",async c=>{
     const u=await currentUser(c);
     if(!u)return c.json({error:"unauthorized"},401);
     const rows=await c.env.DB.prepare(
-      "SELECT cu.id,cpu.cv_url,cpu.full_name,cpu.headline,cpu.summary," +
-      "a.id application_id,a.job_id,j.title job_title,a.status,a.score " +
-      "FROM users cu " +
-      "LEFT JOIN candidate_profiles cpu ON cpu.user_id=cu.id " +
-      "LEFT JOIN applications a ON a.candidate_id=cu.id " +
-      "LEFT JOIN jobs j ON j.id=a.job_id " +
-      "WHERE cu.company_id=? AND cu.role='candidate' " +
+      "SELECT cu.id,cu.name candidate_name,cp.cv_url,cp.full_name,cp.headline,cp.summary,"+
+      "a.id application_id,a.job_id,j.title job_title,a.status,a.score "+
+      "FROM users cu "+
+      "LEFT JOIN candidate_profiles cp ON cp.user_id=cu.id "+
+      "LEFT JOIN applications a ON a.candidate_id=cu.id "+
+      "LEFT JOIN jobs j ON j.id=a.job_id "+
+      "WHERE cu.company_id=? AND cu.role='candidate' "+
       "ORDER BY cu.created_at DESC"
     ).bind(u.company_id).all();
     return c.json(rows.results||[]);
@@ -197,6 +197,7 @@ app.get("/api/candidates",async c=>{
     return c.json({error:"candidates_query_failed",detail:String(e?.message||e)},500);
   }
 });
+
 app.post("/api/candidates/upload",async c=>{
   try{
     const u=await currentUser(c);
@@ -205,48 +206,72 @@ app.post("/api/candidates/upload",async c=>{
     if(u.role!=="company"&&u.role!=="admin")return c.json({error:"company_role_required"},403);
 
     const f=await c.req.formData();
-    const file=f.get("file");
     const jobId=String(f.get("job_id")||"").trim();
+    const incoming=f.getAll("files").filter((x:any)=>x instanceof File) as File[];
 
-    if(!(file instanceof File)||file.size===0)return c.json({error:"cv_file_required"},400);
     if(!jobId)return c.json({error:"job_required"},400);
-    if(file.size>10*1024*1024)return c.json({error:"file_too_large_max_10mb"},413);
+    if(!incoming.length)return c.json({error:"cv_files_required"},400);
+    if(incoming.length>50)return c.json({error:"too_many_files_max_50"},400);
 
     const job=await c.env.DB.prepare(
       "SELECT id,title FROM jobs WHERE id=? AND company_id=? AND status='open' LIMIT 1"
     ).bind(jobId,u.company_id).first<any>();
     if(!job)return c.json({error:"job_not_found_or_closed"},404);
 
-    const uid=id();
-    const baseName=file.name.replace(/\.[^.]+$/,"").replace(/[_-]+/g," ").replace(/\s+/g," ").trim();
-    const candidateName=(baseName||"CV Candidate").slice(0,160);
-    const email=`cv-${uid}@internal.invalid`;
-    const key=`${u.company_id}/candidates/${uid}/${file.name.replace(/[^a-zA-Z0-9._-]+/g,"_").slice(0,160)||"cv"}`;
+    const results:any[]=[];
+    for(const file of incoming){
+      if(file.size===0)continue;
+      if(file.size>10*1024*1024){
+        results.push({filename:file.name,status:"failed",error:"file_too_large_max_10mb"});
+        continue;
+      }
 
-    await c.env.CV_BUCKET.put(key,file.stream(),{
-      httpMetadata:{contentType:file.type||"application/octet-stream"}
-    });
+      const uid=id();
+      const baseName=file.name
+        .replace(/\.[^.]+$/,"")
+        .replace(/[_-]+/g," ")
+        .replace(/\s+/g," ")
+        .trim();
+      const candidateName=(baseName||"CV Candidate").slice(0,160);
+      const email=`cv-${uid}@internal.invalid`;
+      const safeName=file.name.replace(/[^a-zA-Z0-9._-]+/g,"_").slice(0,160)||"cv";
+      const key=`${u.company_id}/candidates/${uid}/${safeName}`;
 
-    const textContent=file.type==="text/plain"?(await file.text()).slice(0,100000):"";
+      await c.env.CV_BUCKET.put(key,file.stream(),{
+        httpMetadata:{contentType:file.type||"application/octet-stream"}
+      });
 
-    await c.env.DB.batch([
-      c.env.DB.prepare(
-        "INSERT INTO users(id,role,email,password_hash,name,phone,status,company_id,approval_status) VALUES(?,?,?,?,?,?,?,?,?)"
-      ).bind(uid,"candidate",email,"!cv-upload-no-login!",candidateName,null,"active",u.company_id,"approved"),
-      c.env.DB.prepare(
-        "INSERT INTO candidate_profiles(user_id,phone,full_name,cv_url,summary) VALUES(?,?,?,?,?)"
-      ).bind(uid,null,candidateName,key,textContent)
-    ]);
+      const textContent=file.type==="text/plain"
+        ?(await file.text()).slice(0,100000)
+        :"";
 
-    await createApplication(c,u,jobId,uid);
-    await audit(c,u,"candidate.upload",uid);
+      await c.env.DB.batch([
+        c.env.DB.prepare(
+          "INSERT INTO users(id,role,email,password_hash,name,phone,status,company_id,approval_status) VALUES(?,?,?,?,?,?,?,?,?)"
+        ).bind(uid,"candidate",email,"!cv-upload-no-login!",candidateName,null,"active",u.company_id,"approved"),
+        c.env.DB.prepare(
+          "INSERT INTO candidate_profiles(user_id,phone,full_name,cv_url,summary) VALUES(?,?,?,?,?)"
+        ).bind(uid,null,candidateName,key,textContent)
+      ]);
 
-    return c.json({
-      id:uid,object_key:key,filename:file.name,job_id:job.id,job_title:job.title,
-      extraction_status:file.type==="text/plain"?"complete":"pending"
-    },201);
+      await createApplication(c,u,jobId,uid);
+      await audit(c,u,"candidate.upload",uid);
+
+      results.push({
+        id:uid,
+        filename:file.name,
+        job_id:job.id,
+        job_title:job.title,
+        status:"uploaded",
+        extraction_status:file.type==="text/plain"?"complete":"pending"
+      });
+    }
+
+    const uploaded=results.filter(x=>x.status==="uploaded").length;
+    const failed=results.filter(x=>x.status==="failed").length;
+    return c.json({ok:true,job_id:job.id,job_title:job.title,total:incoming.length,uploaded,failed,results},201);
   }catch(e:any){
-    return c.json({error:"candidate_upload_failed",detail:String(e?.message||e)},500);
+    return c.json({error:"candidate_bulk_upload_failed",detail:String(e?.message||e)},500);
   }
 });
 app.get("/api/applications",async c=>{try{const u=c.get("user") as AuthUser,m=await appMeta(c.env.DB);if(!m.candidate)return c.json({error:"applications_missing_candidate_key"},500);const tenant=m.tenant?`AND a.${m.tenant}=?`:"";const sql=`SELECT a.id,a.status,a.score,j.id job_id,j.title job_title,cu.id candidate_id,cu.name candidate_name,cu.email candidate_email,cp.cv_url FROM applications a JOIN jobs j ON j.id=a.job_id JOIN users cu ON cu.id=a.${m.candidate} LEFT JOIN candidate_profiles cp ON cp.user_id=cu.id WHERE j.company_id=? ${tenant} ORDER BY a.rowid DESC`;const params=m.tenant?[u.company_id,u.company_id]:[u.company_id];return c.json((await c.env.DB.prepare(sql).bind(...params).all()).results)}catch(e:any){return c.json({error:"applications_query_failed",detail:String(e?.message||e)},500)}});
@@ -261,7 +286,7 @@ app.get("/", (c) => c.html(`<!doctype html>
 <div id="app" class="hidden"><header><div class="brand"><img src="/logo.png" onerror="this.style.display='none'"><span>${c.env.APP_NAME}</span></div><div><span id="who" class="muted"></span> <button class="btn secondary" id="logout">Logout</button></div></header><main><div class="tabs"><button data-tab="overview">Overview</button><button class="secondary" data-tab="jobs">Jobs</button><button class="secondary" data-tab="candidates">Candidates</button><button class="secondary" data-tab="applications">Screening</button></div>
 <section id="overview" class="tab"><div class="grid"><div class="card metric">Jobs<b id="mJobs">0</b></div><div class="card metric">Candidates<b id="mCandidates">0</b></div><div class="card metric">Applications<b id="mApplications">0</b></div><div class="card metric">Strong matches<b id="mStrong">0</b></div></div><div class="card"><h2>AI Screening</h2><p class="muted">Create jobs, upload CVs, attach candidates to jobs, then run rule-based or AI screening.</p></div></section>
 <section id="jobs" class="tab hidden"><div class="card"><h2>Create job</h2><form id="jobForm"><div class="row"><input class="input" id="jobTitle" placeholder="Job title" required><input class="input" id="jobLocation" placeholder="Location"></div><textarea class="input" id="jobDescription" rows="6" placeholder="Job description" required></textarea><input class="input" id="jobSkills" placeholder="Skills, comma separated"><button class="btn" type="submit">Create job</button><p id="jobMsg" class="muted"></p></form></div><div class="card"><h2>Jobs</h2><table class="table"><thead><tr><th>Title</th><th>Location</th><th>Created</th></tr></thead><tbody id="jobsBody"></tbody></table></div></section>
-<section id="candidates" class="tab hidden"><div class="card"><h2>Upload CV</h2><p class="muted">Untuk screening, cukup pilih posisi dan upload CV. Nama, email, dan nomor HP tidak diperlukan.</p><form id="candidateForm"><div class="row"><select class="input" id="candidateJob" required><option value="">Select job position</option></select><input class="input" id="candidateFile" type="file" accept=".pdf,.docx,.txt" required></div><button class="btn">Upload CV</button><p id="candidateMsg" class="muted"></p></form></div><div class="card"><h2>Candidate Screening Pool</h2><table class="table"><thead><tr><th>CV</th><th>Job</th><th>Score</th><th>Status</th></tr></thead><tbody id="candidatesBody"></tbody></table></div></section>
+<section id="candidates" class="tab hidden"><div class="card"><h2>Upload CV</h2><p class="muted">Pilih satu atau banyak CV sekaligus. Anda juga bisa memilih satu folder berisi CV. Nama, email, dan nomor HP tidak diperlukan.</p><form id="candidateForm"><div class="row"><select class="input" id="candidateJob" required><option value="">Select job position</option></select><input class="input" id="candidateFiles" type="file" accept=".pdf,.docx,.txt" multiple webkitdirectory directory required></div><button class="btn">Upload CVs</button><p id="candidateMsg" class="muted"></p></form></div><div class="card"><h2>Candidate Screening Pool</h2><table class="table"><thead><tr><th>CV</th><th>Job</th><th>Score</th><th>Status</th></tr></thead><tbody id="candidatesBody"></tbody></table></div></section>
 <section id="applications" class="tab hidden"><div class="card"><h2>Screening pipeline</h2><table class="table"><thead><tr><th>Candidate</th><th>Job</th><th>Score</th><th>Status</th><th>Actions</th></tr></thead><tbody id="appsBody"></tbody></table></div><div id="result" class="card hidden"><h2>Screening result</h2><pre id="resultText" style="white-space:pre-wrap"></pre></div></section>
 </main></div>
 <script>
@@ -295,7 +320,7 @@ $('#jobForm').onsubmit=async e=>{
     msg.textContent='Create job failed: '+err.message;
   }
 }
-$('#candidateForm').onsubmit=async e=>{e.preventDefault();const fd=new FormData();fd.append('job_id',$('#candidateJob').value);fd.append('file',$('#candidateFile').files[0]);$('#candidateMsg').textContent='Uploading CV...';try{const r=await api('/api/candidates/upload',{method:'POST',body:fd});$('#candidateMsg').textContent=r.extraction_status==='pending'?'CV uploaded. PDF/DOCX extraction is pending.':'CV uploaded and indexed.';e.target.reset();await refresh();loadCandidates()}catch(err){$('#candidateMsg').textContent=err.message}}
+$('#candidateForm').onsubmit=async e=>{e.preventDefault();const files=[...$('#candidateFiles').files];if(!files.length){$('#candidateMsg').textContent='Pilih minimal 1 CV.';return}if(files.length>50){$('#candidateMsg').textContent='Maksimal 50 CV per upload.';return}const fd=new FormData();fd.append('job_id',$('#candidateJob').value);files.forEach(file=>fd.append('files',file,file.name));$('#candidateMsg').textContent='Uploading '+files.length+' CV...';try{const r=await api('/api/candidates/upload',{method:'POST',body:fd});$('#candidateMsg').textContent=`${r.uploaded} CV berhasil diupload${r.failed?`, ${r.failed} gagal`:''}.`;e.target.reset();await refresh();loadCandidates()}catch(err){$('#candidateMsg').textContent=err.message}}
 window.rule=async id=>{try{const r=await api('/api/screenings/rule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({application_id:id})});showResult(r);await refresh();loadApps()}catch(e){showResult({error:e.message})}}
 window.ai=async id=>{try{const r=await api('/api/ai/screen',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({application_id:id})});showResult(r);await refresh();loadApps()}catch(e){showResult({error:e.message})}}
 function showResult(x){$('#result').classList.remove('hidden');$('#resultText').textContent=JSON.stringify(x,null,2)}
