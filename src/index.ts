@@ -35,15 +35,27 @@ async function createSession(c:any,u:AuthUser){
 async function currentUser(c:any):Promise<AuthUser|null>{
   const raw=cookieToken(c.req.raw);
   if(!raw)return null;
-  const row=await c.env.DB.prepare(
-    "SELECT u.id,u.company_id,u.name,u.email,u.role,COALESCE(cp.company_name,u.name) company_name " +
-    "FROM sessions s JOIN users u ON u.id=s.user_id " +
-    "LEFT JOIN company_profiles cp ON cp.user_id=u.company_id " +
-    "WHERE s.token=? AND s.expires_at>CURRENT_TIMESTAMP LIMIT 1"
-  ).bind(await sha256(raw)).first<AuthUser>();
-  return row||null;
+  try{
+    const row=await c.env.DB.prepare(
+      "SELECT u.id,u.company_id,u.name,u.email,u.role,COALESCE(cp.company_name,u.name) company_name " +
+      "FROM sessions s JOIN users u ON u.id=s.user_id " +
+      "LEFT JOIN company_profiles cp ON cp.user_id=u.company_id " +
+      "WHERE s.token=? AND s.expires_at>CURRENT_TIMESTAMP LIMIT 1"
+    ).bind(await sha256(raw)).first<AuthUser>();
+    return row||null;
+  }catch(e:any){
+    throw new Error("session_lookup_failed: "+String(e?.message||e));
+  }
 }
-async function requireAuth(c:any,next:any){const u=await currentUser(c);if(!u)return c.json({error:"unauthorized"},401);c.set("user",u);await next()}
+async function requireAuth(c:any,next:any){
+  try{
+    const u=await currentUser(c);
+    if(!u)return c.json({error:"unauthorized"},401);
+    c.set("user",u);await next();
+  }catch(e:any){
+    return c.json({error:"auth_failed",detail:String(e?.message||e)},500);
+  }
+}
 async function audit(c:any,u:AuthUser,action:string,entityId?:string){try{const cs=await columns(c.env.DB,"admin_audit_logs");const fields:string[]=[];const vals:any[]=[];const add=(n:string,v:any)=>{if(cs.has(n)){fields.push(n);vals.push(v)}};add("id",id());add("user_id",u.id);add("action",action);add("entity_id",entityId||null);add("company_id",u.company_id);add("created_at",new Date().toISOString());if(fields.length)await c.env.DB.prepare(`INSERT INTO admin_audit_logs(${fields.join(",")}) VALUES(${fields.map(()=>"?").join(",")})`).bind(...vals).run()}catch{}}
 async function appMeta(db:D1Database){const cs=await columns(db,"applications");return {cs,candidate:cs.has("candidate_id")?"candidate_id":cs.has("user_id")?"user_id":null,tenant:cs.has("company_id")?"company_id":cs.has("organization_id")?"organization_id":null}}
 async function createApplication(c:any,u:AuthUser,jobId:string,candidateUserId:string){const m=await appMeta(c.env.DB);if(!m.candidate)throw new Error("applications_missing_candidate_key");const f=["id","job_id",m.candidate],v:any[]=[id(),jobId,candidateUserId];if(m.tenant){f.push(m.tenant);v.push(u.company_id)}if(m.cs.has("status")){f.push("status");v.push("Review")}if(m.cs.has("score")){f.push("score");v.push(0)}await c.env.DB.prepare(`INSERT INTO applications(${f.join(",")}) VALUES(${f.map(()=>"?").join(",")})`).bind(...v).run()}
@@ -96,7 +108,7 @@ app.post("/api/auth/login",async c=>{try{const b=await c.req.json<any>(),email=S
 app.post("/api/auth/logout",async c=>{try{const raw=cookieToken(c.req.raw);const cs=await columns(c.env.DB,"sessions");const tokenCol=cs.has("id")?"id":cs.has("session_id")?"session_id":cs.has("token_hash")?"token_hash":cs.has("token")?"token":null;if(raw&&tokenCol)await c.env.DB.prepare(`DELETE FROM sessions WHERE ${tokenCol}=?`).bind(await sha256(raw)).run();c.header("Set-Cookie",setCookie("",0));return c.json({ok:true})}catch{return c.json({ok:true})}});
 app.get("/api/auth/me",requireAuth,c=>c.json({user:c.get("user")}));
 for(const p of ["/api/jobs","/api/candidates","/api/applications","/api/dashboard","/api/screenings/*"])app.use(p,requireAuth);
-app.get("/api/dashboard",async c=>{const u=c.get("user") as AuthUser;const [j,ca,a]=await Promise.all([c.env.DB.prepare("SELECT COUNT(*) count FROM jobs WHERE company_id=?").bind(u.company_id).first<any>(),c.env.DB.prepare("SELECT COUNT(*) count FROM users WHERE company_id=? AND role='candidate'").bind(u.company_id).first<any>(),c.env.DB.prepare("SELECT COUNT(*) count FROM applications a JOIN jobs j ON j.id=a.job_id WHERE j.company_id=?").bind(u.company_id).first<any>()]);return c.json({jobs:j?.count||0,candidates:ca?.count||0,applications:a?.count||0,strong_matches:0})});
+app.get("/api/dashboard",async c=>{try{const u=c.get("user") as AuthUser;if(!u.company_id)return c.json({error:"company_id_missing"},403);const [j,ca,a]=await Promise.all([c.env.DB.prepare("SELECT COUNT(*) count FROM jobs WHERE company_id=?").bind(u.company_id).first<any>(),c.env.DB.prepare("SELECT COUNT(*) count FROM users WHERE company_id=? AND role='candidate'").bind(u.company_id).first<any>(),c.env.DB.prepare("SELECT COUNT(*) count FROM applications a JOIN jobs j ON j.id=a.job_id WHERE j.company_id=?").bind(u.company_id).first<any>()]);return c.json({jobs:Number(j?.count||0),candidates:Number(ca?.count||0),applications:Number(a?.count||0),strong_matches:0})}catch(e:any){return c.json({error:"dashboard_query_failed",detail:String(e?.message||e)},500)}});
 app.get("/api/jobs",async c=>{const u=c.get("user") as AuthUser;return c.json((await c.env.DB.prepare("SELECT id,title,location,salary,description,status,created_at FROM jobs WHERE company_id=? ORDER BY created_at DESC").bind(u.company_id).all()).results)});
 app.post("/api/jobs",async c=>{const u=c.get("user") as AuthUser,b=await c.req.json<any>();if(!String(b.title||"").trim()||!String(b.description||"").trim())return c.json({error:"title,description_required"},400);const jid=id();await c.env.DB.prepare("INSERT INTO jobs(id,company_id,title,location,salary,description,status,created_at) VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP)").bind(jid,u.company_id,String(b.title).trim(),String(b.location||"").trim(),String(b.salary||"").trim(),String(b.description).trim(),"open").run();await audit(c,u,"job.create",jid);return c.json({id:jid},201)});
 app.get("/api/candidates",async c=>{const u=c.get("user") as AuthUser;return c.json((await c.env.DB.prepare(`SELECT u.id,u.name,u.email,u.phone,cp.cv_url,cp.full_name,cp.headline,cp.summary FROM users u LEFT JOIN candidate_profiles cp ON cp.user_id=u.id WHERE u.company_id=? AND u.role='candidate' ORDER BY u.created_at DESC`).bind(u.company_id).all()).results)});
@@ -122,7 +134,7 @@ let registerMode=false;
 async function api(path,opt={}){const r=await fetch(path,{credentials:'same-origin',...opt});const data=await r.json().catch(()=>({}));if(!r.ok){const base=data.error||'request_failed';const message=data.detail?base+': '+data.detail:base;throw new Error(message)}return data}
 function setMode(){registerMode=!registerMode;$('#authTitle').textContent=registerMode?'Create organization':'Sign in';$('#authBtn').textContent=registerMode?'Create account':'Sign in';$('#orgField').classList.toggle('hidden',!registerMode);$('#name').required=registerMode;$('#toggleAuth').textContent=registerMode?'Back to sign in':'Create an organization'}
 $('#toggleAuth').onclick=e=>{e.preventDefault();setMode()};
-$('#authForm').onsubmit=async e=>{e.preventDefault();$('#authMsg').textContent='Working...';try{const path=registerMode?'/api/auth/register':'/api/auth/login';const body=registerMode?{organization_name:$('#org').value,name:$('#name').value,email:$('#email').value,password:$('#password').value}:{email:$('#email').value,password:$('#password').value};await api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await boot()}catch(err){$('#authMsg').textContent=err.message}}
+$('#authForm').onsubmit=async e=>{e.preventDefault();$('#authMsg').textContent='Working...';try{const path=registerMode?'/api/auth/register':'/api/auth/login';const body=registerMode?{organization_name:$('#org').value,name:$('#name').value,email:$('#email').value,password:$('#password').value}:{email:$('#email').value,password:$('#password').value};const r=await api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});$('#auth').classList.add('hidden');$('#app').classList.remove('hidden');$('#who').textContent=r.user.name+' · '+(r.user.company_name||'');$('#authMsg').textContent='Loading dashboard...';try{await refresh();$('#authMsg').textContent=''}catch(e){$('#authMsg').textContent='Dashboard error: '+e.message}}catch(err){$('#authMsg').textContent=err.message}}
 $('#logout').onclick=async()=>{await api('/api/auth/logout',{method:'POST'});location.reload()};
 $$('.tabs button').forEach(b=>b.onclick=()=>{$$('.tabs button').forEach(x=>x.classList.add('secondary'));b.classList.remove('secondary');$$('.tab').forEach(x=>x.classList.add('hidden'));$('#'+b.dataset.tab).classList.remove('hidden');if(b.dataset.tab==='jobs')loadJobs();if(b.dataset.tab==='candidates')loadCandidates();if(b.dataset.tab==='applications')loadApps()});
 async function loadJobs(){const jobs=await api('/api/jobs');$('#jobsBody').innerHTML=jobs.map(j=>\`<tr><td>\${esc(j.title)}</td><td>\${esc(j.location||'-')}</td><td>\${new Date(j.created_at).toLocaleString()}</td></tr>\`).join('');$('#candidateJob').innerHTML='<option value="">Attach to job (optional)</option>'+jobs.map(j=>\`<option value="\${j.id}">\${esc(j.title)}</option>\`).join('')}
@@ -135,7 +147,7 @@ window.rule=async id=>{try{const r=await api('/api/screenings/rule',{method:'POS
 window.ai=async id=>{try{const r=await api('/api/ai/screen',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({application_id:id})});showResult(r);await refresh();loadApps()}catch(e){showResult({error:e.message})}}
 function showResult(x){$('#result').classList.remove('hidden');$('#resultText').textContent=JSON.stringify(x,null,2)}
 function esc(s){return String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]))}
-async function boot(){try{const r=await api('/api/auth/me');$('#auth').classList.add('hidden');$('#app').classList.remove('hidden');$('#who').textContent=r.user.name+' · '+r.user.company_name;await refresh()}catch{}}
+async function boot(){try{const r=await api('/api/auth/me');$('#auth').classList.add('hidden');$('#app').classList.remove('hidden');$('#who').textContent=r.user.name+' · '+(r.user.company_name||'');await refresh();$('#authMsg').textContent=''}catch(e){$('#authMsg').textContent='Login/session error: '+e.message;$('#auth').classList.remove('hidden');$('#app').classList.add('hidden')}}
 boot();
 </script></body></html>`));
 
