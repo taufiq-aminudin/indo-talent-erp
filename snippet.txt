@@ -1,0 +1,481 @@
+  try{
+    const raw=cookieToken(c.req.raw);
+    if(raw)await c.env.DB.prepare("DELETE FROM sessions WHERE token=?").bind(await sha256(raw)).run();
+  }catch{}
+  c.header("Set-Cookie",setCookie("",0));
+  return c.json({ok:true});
+});
+app.get("/api/auth/me",requireAuth,c=>c.json({user:c.get("user")}));
+app.get("/api/auth/status",async c=>{
+  try{
+    const u=await currentUser(c);
+    return c.json({authenticated:!!u,cookie_present:!!cookieToken(c.req.raw),user:u?{id:u.id,role:u.role,company_id:u.company_id,email:u.email}:null});
+  }catch(e:any){
+    return c.json({authenticated:false,error:"auth_status_failed",detail:String(e?.message||e)},500);
+  }
+});
+for(const p of ["/api/candidates","/api/applications","/api/dashboard","/api/screenings/*"])app.use(p,requireAuth);
+app.get("/api/dashboard",async c=>{try{const u=c.get("user") as AuthUser;if(!u.company_id)return c.json({error:"company_id_missing"},403);const [j,ca,a]=await Promise.all([c.env.DB.prepare("SELECT COUNT(*) count FROM jobs WHERE company_id=?").bind(u.company_id).first<any>(),c.env.DB.prepare("SELECT COUNT(*) count FROM users WHERE company_id=? AND role='candidate'").bind(u.company_id).first<any>(),c.env.DB.prepare("SELECT COUNT(*) count FROM applications a JOIN jobs j ON j.id=a.job_id WHERE j.company_id=?").bind(u.company_id).first<any>()]);return c.json({jobs:Number(j?.count||0),candidates:Number(ca?.count||0),applications:Number(a?.count||0),strong_matches:0})}catch(e:any){return c.json({error:"dashboard_query_failed",detail:String(e?.message||e)},500)}});
+app.get("/api/jobs",async c=>{
+  try{
+    const u=await currentUser(c);
+    if(!u)return c.json({error:"unauthorized",stage:"job_auth",cookie_present:!!cookieToken(c.req.raw)},401);
+    if(!u.company_id)return c.json({error:"company_context_missing"},400);
+    const rows=await c.env.DB.prepare(
+      "SELECT id,title,location,salary,description,status,created_at FROM jobs WHERE company_id=? AND COALESCE(status,'open')<>'deleted' ORDER BY created_at DESC"
+    ).bind(u.company_id).all();
+    return c.json(rows.results||[]);
+  }catch(e:any){
+    return c.json({error:"job_list_failed",detail:String(e?.message||e)},500);
+  }
+});
+
+app.patch("/api/jobs/:id",async c=>{
+  try{
+    const u=await currentUser(c);
+    if(!u)return c.json({error:"unauthorized",stage:"job_auth"},401);
+    if(!u.company_id)return c.json({error:"company_context_missing"},400);
+    if(u.role!=="company"&&u.role!=="admin")return c.json({error:"company_role_required",stage:"job_auth",role:u.role},403);
+    const jid=c.req.param("id");
+    const existing=await c.env.DB.prepare("SELECT id,title,location,salary,description,status FROM jobs WHERE id=? AND company_id=? LIMIT 1").bind(jid,u.company_id).first<any>();
+    if(!existing||existing.status==='deleted')return c.json({error:"job_not_found"},404);
+    const b=await c.req.json<any>();
+    const title=String(b.title??existing.title??"").trim();
+    const location=String(b.location??existing.location??"").trim();
+    const salary=String(b.salary??existing.salary??"").trim();
+    const description=String(b.description??existing.description??"").trim();
+    const requirements=Array.isArray(b.requirements)?b.requirements.map((x:any)=>String(x).trim()).filter(Boolean):[];
+    if(!title||!description)return c.json({error:"title,description_required"},400);
+    const finalDescription=description.replace(/\n\nRequired skills:\n(?:- .*\n?)+$/i,"").trim() + (requirements.length?"\n\nRequired skills:\n"+requirements.map((x:string)=>"- "+x).join("\n"):"");
+    await c.env.DB.prepare("UPDATE jobs SET title=?,location=?,salary=?,description=? WHERE id=? AND company_id=?").bind(title,location,salary,finalDescription,jid,u.company_id).run();
+    await audit(c,u,"job.update",jid);
+    return c.json({ok:true,id:jid,title,location,salary,description:finalDescription,status:existing.status||'open'});
+  }catch(e:any){
+    return c.json({error:"job_update_failed",detail:String(e?.message||e)},500);
+  }
+});
+
+app.delete("/api/jobs/:id",async c=>{
+  try{
+    const u=await currentUser(c);
+    if(!u)return c.json({error:"unauthorized",stage:"job_auth"},401);
+    if(!u.company_id)return c.json({error:"company_context_missing"},400);
+    if(u.role!=="company"&&u.role!=="admin")return c.json({error:"company_role_required",stage:"job_auth",role:u.role},403);
+    const jid=c.req.param("id");
+    const existing=await c.env.DB.prepare("SELECT id,title,status FROM jobs WHERE id=? AND company_id=? LIMIT 1").bind(jid,u.company_id).first<any>();
+    if(!existing||existing.status==='deleted')return c.json({error:"job_not_found"},404);
+    // Soft delete: keep applications/screening history intact while removing the job from the active workspace.
+    await c.env.DB.prepare("UPDATE jobs SET status='deleted' WHERE id=? AND company_id=?").bind(jid,u.company_id).run();
+    await audit(c,u,"job.delete",jid);
+    return c.json({ok:true,id:jid,deleted:true});
+  }catch(e:any){
+    return c.json({error:"job_delete_failed",detail:String(e?.message||e)},500);
+  }
+});
+
+// Compatibility endpoints: some managed proxies are stricter with PATCH/DELETE.
+app.post("/api/jobs/:id/update",async c=>{
+  const req=new Request(c.req.raw.url.replace(`/api/jobs/${c.req.param("id")}/update`,`/api/jobs/${c.req.param("id")}`),{method:"PATCH",headers:c.req.raw.headers,body:await c.req.raw.clone().text()});
+  return app.fetch(req,c.env);
+});
+app.post("/api/jobs/:id/delete",async c=>{
+  const req=new Request(c.req.raw.url.replace(`/api/jobs/${c.req.param("id")}/delete`,`/api/jobs/${c.req.param("id")}`),{method:"DELETE",headers:c.req.raw.headers});
+  return app.fetch(req,c.env);
+});
+
+app.post("/api/jobs",async c=>{
+  try{
+    const u=await currentUser(c);
+    if(!u)return c.json({error:"unauthorized",stage:"job_auth",cookie_present:!!cookieToken(c.req.raw)},401);
+    if(!u.company_id)return c.json({error:"company_context_missing",stage:"job_auth"},400);
+    if(u.role!=="company"&&u.role!=="admin")return c.json({error:"company_role_required",stage:"job_auth",role:u.role},403);
+
+    const b=await c.req.json<any>();
+    const title=String(b.title||"").trim();
+    const location=String(b.location||"").trim();
+    const salary=String(b.salary||"").trim();
+    const description=String(b.description||"").trim();
+    const requirements=Array.isArray(b.requirements)?b.requirements.map((x:any)=>String(x).trim()).filter(Boolean):[];
+    if(!title||!description)return c.json({error:"title,description_required"},400);
+
+    const finalDescription=requirements.length
+      ? description+"\n\nRequired skills:\n"+requirements.map((x:string)=>"- "+x).join("\n")
+      : description;
+
+    const jid=id();
+    await c.env.DB.prepare(
+      "INSERT INTO jobs(id,company_id,title,location,salary,description,status,created_at) VALUES(?,?,?,?,?,?,?,CURRENT_TIMESTAMP)"
+    ).bind(jid,u.company_id,title,location,salary,finalDescription,"open").run();
+
+    await audit(c,u,"job.create",jid);
+    return c.json({ok:true,id:jid,title},201);
+  }catch(e:any){
+    return c.json({error:"job_create_failed",detail:String(e?.message||e)},500);
+  }
+});
+app.get("/api/candidates",async c=>{
+  try{
+    const u=await currentUser(c);
+    if(!u)return c.json({error:"unauthorized"},401);
+    const rows=await c.env.DB.prepare(
+      "SELECT cu.id,cu.name candidate_name,cp.cv_url,cp.full_name,cp.headline,cp.summary,"+
+      "a.id application_id,a.job_id,j.title job_title,a.status,a.score "+
+      "FROM users cu "+
+      "LEFT JOIN candidate_profiles cp ON cp.user_id=cu.id "+
+      "LEFT JOIN applications a ON a.candidate_id=cu.id "+
+      "LEFT JOIN jobs j ON j.id=a.job_id "+
+      "WHERE cu.company_id=? AND cu.role='candidate' "+
+      "ORDER BY cu.created_at DESC"
+    ).bind(u.company_id).all();
+    return c.json(rows.results||[]);
+  }catch(e:any){
+    return c.json({error:"candidates_query_failed",detail:String(e?.message||e)},500);
+  }
+});
+
+app.post("/api/candidates/upload",async c=>{
+  try{
+    const u=await currentUser(c);
+    if(!u)return c.json({error:"unauthorized",stage:"candidate_upload_auth"},401);
+    if(!u.company_id)return c.json({error:"company_context_missing"},400);
+    if(u.role!=="company"&&u.role!=="admin")return c.json({error:"company_role_required"},403);
+
+    const f=await c.req.formData();
+    const jobId=String(f.get("job_id")||"").trim();
+    const incoming=f.getAll("files").filter((x:any)=>x instanceof File) as File[];
+
+    if(!jobId)return c.json({error:"job_required"},400);
+    if(!incoming.length)return c.json({error:"cv_files_required"},400);
+    if(incoming.length>50)return c.json({error:"too_many_files_max_50"},400);
+
+    const job=await c.env.DB.prepare(
+      "SELECT id,title FROM jobs WHERE id=? AND company_id=? AND status='open' LIMIT 1"
+    ).bind(jobId,u.company_id).first<any>();
+    if(!job)return c.json({error:"job_not_found_or_closed"},404);
+
+    const results:any[]=[];
+    for(const file of incoming){
+      if(file.size===0)continue;
+      if(file.size>10*1024*1024){
+        results.push({filename:file.name,status:"failed",error:"file_too_large_max_10mb"});
+        continue;
+      }
+
+      const uid=id();
+      const baseName=file.name
+        .replace(/\.[^.]+$/,"")
+        .replace(/[_-]+/g," ")
+        .replace(/\s+/g," ")
+        .trim();
+      const candidateName=(baseName||"CV Candidate").slice(0,160);
+      const email=`cv-${uid}@internal.invalid`;
+      const safeName=file.name.replace(/[^a-zA-Z0-9._-]+/g,"_").slice(0,160)||"cv";
+      const key=`${u.company_id}/candidates/${uid}/${safeName}`;
+
+      await c.env.CV_BUCKET.put(key,file.stream(),{
+        httpMetadata:{contentType:file.type||"application/octet-stream"}
+      });
+
+      const textContent=file.type==="text/plain"
+        ?(await file.text()).slice(0,100000)
+        :"";
+
+      await c.env.DB.batch([
+        c.env.DB.prepare(
+          "INSERT INTO users(id,role,email,password_hash,name,phone,status,company_id,approval_status) VALUES(?,?,?,?,?,?,?,?,?)"
+        ).bind(uid,"candidate",email,"!cv-upload-no-login!",candidateName,null,"active",u.company_id,"approved"),
+        c.env.DB.prepare(
+          "INSERT INTO candidate_profiles(user_id,phone,full_name,cv_url,summary) VALUES(?,?,?,?,?)"
+        ).bind(uid,null,candidateName,key,textContent)
+      ]);
+
+      await createApplication(c,u,jobId,uid);
+      await audit(c,u,"candidate.upload",uid);
+
+      results.push({
+        id:uid,
+        filename:file.name,
+        job_id:job.id,
+        job_title:job.title,
+        status:"uploaded",
+        extraction_status:file.type==="text/plain"?"complete":"pending"
+      });
+    }
+
+    const uploaded=results.filter(x=>x.status==="uploaded").length;
+    const failed=results.filter(x=>x.status==="failed").length;
+    return c.json({ok:true,job_id:job.id,job_title:job.title,total:incoming.length,uploaded,failed,results},201);
+  }catch(e:any){
+    return c.json({error:"candidate_bulk_upload_failed",detail:String(e?.message||e)},500);
+  }
+});
+app.get("/api/applications",async c=>{
+  try{
+    const u=c.get("user") as AuthUser;
+    const m=await appMeta(c.env.DB);
+    if(!m.candidate)return c.json({error:"applications_missing_candidate_key"},500);
+    const tenant=m.tenant?`AND a.${m.tenant}=?`:"";
+    const score=m.cs.has("ai_score")?"a.ai_score":m.cs.has("score")?"a.score":"NULL";
+    const sql=`SELECT a.id,a.status,${score} screening_score,a.ai_recommendation,a.ai_summary,
+      a.ai_strengths,a.ai_weaknesses,a.ai_matched_skills,a.ai_missing_skills,
+      a.ai_interview_questions,j.id job_id,j.title job_title,cu.id candidate_id,
+      cu.name candidate_name,cp.cv_url,cp.summary cv_summary,cp.skills,cp.experience_years
+      FROM applications a
+      JOIN jobs j ON j.id=a.job_id
+      JOIN users cu ON cu.id=a.${m.candidate}
+      LEFT JOIN candidate_profiles cp ON cp.user_id=cu.id
+      WHERE j.company_id=? ${tenant}
+      ORDER BY a.rowid DESC`;
+    const params=m.tenant?[u.company_id,u.company_id]:[u.company_id];
+    return c.json((await c.env.DB.prepare(sql).bind(...params).all()).results||[]);
+  }catch(e:any){
+    return c.json({error:"applications_query_failed",detail:String(e?.message||e)},500);
+  }
+});
+app.post("/api/screenings/rule",async c=>{
+  try{
+    const u=c.get("user") as AuthUser;
+    const b=await c.req.json<any>();
+    const m=await appMeta(c.env.DB);
+    if(!m.candidate)return c.json({error:"applications_missing_candidate_key"},500);
+    const r=await c.env.DB.prepare(
+      `SELECT a.id,j.title,j.description,cu.name,cp.skills,cp.experience_years,cp.summary,cp.current_position,cp.education,cp.languages
+       FROM applications a JOIN jobs j ON j.id=a.job_id
+       JOIN users cu ON cu.id=a.${m.candidate}
+       LEFT JOIN candidate_profiles cp ON cp.user_id=cu.id
+       WHERE a.id=? AND j.company_id=? LIMIT 1`
+    ).bind(b.application_id,u.company_id).first<any>();
+    if(!r)return c.json({error:"application_not_found"},404);
+    const hasCvEvidence=Boolean(String(r.skills||r.summary||r.current_position||r.education||r.languages||"").trim() || Number(r.experience_years||0)>0);
+    if(!hasCvEvidence)return c.json({error:"cv_not_extracted",message:"Extract the CV before running Rule Screening."},409);
+
+    const norm=(v:any)=>String(v||"").toLowerCase().replace(/&/g," and ").replace(/[^a-z0-9+#.\-\s]/g," ").replace(/\s+/g," ").trim();
+    const jobText=norm(`${r.title||""} ${r.description||""}`);
+    const profileText=norm(`${r.summary||""} ${r.current_position||""} ${r.skills||""} ${r.education||""} ${r.languages||""}`);
+    const explicitSkills=String(r.description||"").match(/Required skills:\s*([\s\S]*)$/i)?.[1]||"";
+    const explicitSkillTokens=explicitSkills.split(/[,\n;|]/).map((x:string)=>norm(x.replace(/^[-*•]\s*/,""))).filter((x:string)=>x.length>=3);
+
+    // Only compare recognised job-relevant competencies. Do NOT turn ordinary JD words
+    // such as "posisi", "departemen", "lokasi", "atasan", "langsung", etc. into skills.
+    const skillMap:any[]=[
+      ["accounting",["accounting","akuntansi","financial accounting"]],
+      ["financial management",["financial management","manajemen keuangan","finance management"]],
+      ["financial reporting",["financial reporting","financial report","laporan keuangan","laporan finansial"]],
+      ["financial analysis",["financial analysis","analisis keuangan"]],
+      ["budgeting",["budgeting","budget preparation","penyusunan anggaran","anggaran"]],
+      ["forecasting",["forecasting","financial forecasting","proyeksi keuangan"]],
+      ["financial planning",["financial planning","perencanaan keuangan"]],
+      ["tax",["tax","taxation","pajak","perpajakan"]],
+      ["audit",["audit","auditing","internal audit","audit internal"]],
+      ["compliance",["compliance","regulatory compliance","kepatuhan"]],
+      ["treasury",["treasury","cash management","manajemen kas"]],
+      ["cash flow",["cash flow","arus kas"]],
+      ["accounts payable",["accounts payable","account payable","utang usaha"]],
+      ["accounts receivable",["accounts receivable","account receivable","piutang usaha"]],
+      ["cost control",["cost control","cost management","pengendalian biaya"]],
+      ["payroll",["payroll","penggajian"]],
+      ["erp",["erp","sap","oracle erp","netsuite"]],
+      ["microsoft excel",["microsoft excel","ms excel","excel"]],
+      ["data analysis",["data analysis","data analytics","analisis data"]],
+      ["leadership",["leadership","kepemimpinan"]],
+      ["team management",["team management","people management","manajemen tim","memimpin tim"]],
+      ["project management",["project management","manajemen proyek"]],
+      ["communication",["communication","komunikasi"]],
+      ["analytical thinking",["analytical thinking","analytical skills","berpikir analitis","analisis"]],
+      ["attention to detail",["attention to detail","detail oriented","detail-oriented","ketelitian"]],
+      ["decision making",["decision making","decision-making","pengambilan keputusan"]],
+      ["integrity",["integrity","integritas"]],
+      ["time management",["time management","manajemen waktu"]],
+      ["problem solving",["problem solving","pemecahan masalah"]],
+      ["risk management",["risk management","manajemen risiko"]],
+      ["procurement",["procurement","purchasing","pengadaan"]],
+      ["inventory management",["inventory management","stock management","manajemen persediaan"]],
+      ["human resources",["human resources","human resource","hr","sumber daya manusia"]],
+      ["recruitment",["recruitment","rekrutmen"]]
+    ];
+    const contains=(text:string,phrase:string)=>{const p=norm(phrase);return p&&(` ${text} `).includes(` ${p} `)};
+    const requirements=[...new Set([
+      ...skillMap.filter(([,aliases])=>aliases.some((x:string)=>contains(jobText,x))).map(([name])=>name),
+      ...explicitSkillTokens.flatMap((token:string)=>{
+        const hit=skillMap.find(([,aliases])=>aliases.some((x:string)=>contains(token,x)||contains(x,token)));
+        return hit?[hit[0]]:[];
+      })
+    ])];
+    const candidateSkills=skillMap.filter(([,aliases])=>aliases.some((x:string)=>contains(profileText,x))).map(([name])=>name);
+    const matched=requirements.filter((x:string)=>candidateSkills.includes(x));
+    const missing=requirements.filter((x:string)=>!candidateSkills.includes(x));
+    const skillMatch=requirements.length?Math.round(matched.length/requirements.length*50):0;
+
+    const exp=Number(r.experience_years||0);
+    const yearMatch=jobText.match(/(?:minimum|minimal|at least|\b)\s*(\d+)\s*(?:\+\s*)?(?:years?|tahun)/i);
+    const requiredYears=yearMatch?Number(yearMatch[1]):0;
+    const experienceScore=requiredYears>0?Math.min(25,Math.round(Math.min(exp/requiredYears,1)*25)):
+      (exp>=8?25:exp>=5?22:exp>=3?18:exp>=1?12:0);
+
+    const title=norm(r.title);
+    const titleTerms=[...new Set((title.match(/[a-z0-9+#.\-]{3,}/g)||[]).filter((x:string)=>!new Set(["manager","senior","junior","staff","lead","head","finance","the","and","dan","untuk"]).has(x)))];
+    const roleSkillHints=skillMap.filter(([,aliases])=>aliases.some((x:string)=>contains(title,x))).map(([name])=>name);
+    const roleHits=roleSkillHints.filter((x:string)=>candidateSkills.includes(x));
+    const roleScore=roleSkillHints.length?Math.round(roleHits.length/roleSkillHints.length*15):(titleTerms.some((x:string)=>profileText.includes(x))?10:0);
+    const completeness=[r.summary,r.current_position,r.education,r.skills,r.experience_years].filter((x:any)=>String(x??"").trim()!=="").length;
+    const completenessScore=Math.min(10,Math.round((completeness/5)*10));
+    const score=Math.max(0,Math.min(100,skillMatch+experienceScore+roleScore+completenessScore));
+    const status=score>=85?"Strong Match":score>=70?"Potential Match":"Low Match";
+    const breakdown={skills_match:{score:skillMatch,max:50},experience:{score:experienceScore,max:25},role_relevance:{score:roleScore,max:15},profile_completeness:{score:completenessScore,max:10}};
+    const evidence=[
+      exp?`${exp} year${exp===1?"":"s"} of experience`:"Experience duration not stated",
+      r.current_position?`Current position: ${String(r.current_position)}`:"Current position not stated",
+      ...matched.slice(0,6).map((x:string)=>`CV evidence includes ${x}`)
+    ];
+    const review=[...missing.slice(0,10).map((x:string)=>`${x} is required by the job but not evidenced in the CV`),...(exp===0?["Experience duration could not be verified from the extracted CV"]:[])];
+    if(m.cs.has("ai_score")){
+      await c.env.DB.prepare("UPDATE applications SET ai_score=?,status=?,ai_recommendation=?,ai_summary=?,ai_strengths=?,ai_weaknesses=?,ai_matched_skills=?,ai_missing_skills=?,ai_screened_at=CURRENT_TIMESTAMP WHERE id=?")
+        .bind(score,status,"Rule-based screening",`Rule-based comparison of recognised job requirements against extracted CV evidence for ${r.title}.`,JSON.stringify(matched),JSON.stringify(review),JSON.stringify(matched),JSON.stringify(missing),b.application_id).run();
+    }else if(m.cs.has("score")){
+      await c.env.DB.prepare("UPDATE applications SET score=?,status=? WHERE id=?").bind(score,status,b.application_id).run();
+    }else if(m.cs.has("status")){
+      await c.env.DB.prepare("UPDATE applications SET status=? WHERE id=?").bind(status,b.application_id).run();
+    }
+    await audit(c,u,"screening.rule",b.application_id);
+    return c.json({overall_score:score,status,matched_skills:matched,missing_skills:missing,requirements, candidate_skills:candidateSkills,evidence,areas_to_review:review,breakdown,note:"Rule-based screening compares recognised job requirements with evidence extracted from the candidate CV. Generic JD words are excluded."});
+  }catch(e:any){return c.json({error:"rule_screen_failed",detail:String(e?.message||e)},500)}
+});
+
+async function extractCvWithOpenAI(c:any, fileKey:string, filename:string, mimeType:string){
+  if(!c.env.OPENAI_API_KEY)throw new Error("ai_not_configured");
+  const obj=await c.env.CV_BUCKET.get(fileKey);
+  if(!obj)throw new Error("cv_file_not_found");
+  const bytes=await obj.arrayBuffer();
+  if(bytes.byteLength>12*1024*1024)throw new Error("cv_file_too_large_for_extraction");
+  const base64=Array.from(new Uint8Array(bytes),b=>String.fromCharCode(b)).join("");
+  const dataUrl=`data:${mimeType||"application/octet-stream"};base64,${btoa(base64)}`;
+  const schema={
+    type:"object",additionalProperties:false,
+    properties:{
+      education:{type:"string"},
+      experience_years:{type:"integer",minimum:0,maximum:60},
+      current_position:{type:"string"},
+      skills:{type:"array",items:{type:"string"}},
+      languages:{type:"array",items:{type:"string"}},
+      headline:{type:"string"},
+      summary:{type:"string"},
+      work_history:{type:"array",items:{type:"string"}},
+      achievements:{type:"array",items:{type:"string"}}
+    },
+    required:["education","experience_years","current_position","skills","languages","headline","summary","work_history","achievements"]
+  };
+  const resp=await fetch("https://api.openai.com/v1/responses",{
+    method:"POST",
+    headers:{Authorization:`Bearer ${c.env.OPENAI_API_KEY}`,"Content-Type":"application/json"},
+    body:JSON.stringify({
+      model:c.env.OPENAI_MODEL||"gpt-5.6-luna",
+      store:false,
+      instructions:"Extract job-relevant information from this CV. Do not extract or return email, phone number, address, date of birth, gender, religion, race, marital status, photo details, national ID, or other protected/sensitive personal information. Do not invent missing facts. Use an empty string/array or 0 when evidence is absent. Return structured JSON only.",
+      input:[{role:"user",content:[
+        {type:"input_text",text:`Extract the CV for screening. Filename: ${filename}`},
+        {type:"input_file",file_data:dataUrl,filename:filename}
+      ]}],
+      text:{format:{type:"json_schema",name:"cv_extraction",strict:true,schema}}
+    })
+  });
+  if(!resp.ok){
+    const errText=await resp.text();
+    throw new Error(`openai_extraction_failed_${resp.status}:${errText.slice(0,300)}`);
+  }
+  const d=await resp.json() as any;
+  const content=d?.output?.flatMap((x:any)=>x?.content||[]).find((x:any)=>x?.type==="output_text")?.text;
+  if(!content)throw new Error("empty_extraction_response");
+  return JSON.parse(content);
+}
+
+app.post("/api/candidates/extract",async c=>{
+  try{
+    const u=await currentUser(c);if(!u)return c.json({error:"unauthorized",stage:"cv_extract_auth"},401);
+    const b=await c.req.json<any>();
+    const m=await appMeta(c.env.DB);
+    if(!m.candidate)return c.json({error:"applications_missing_candidate_key"},500);
+    const r=await c.env.DB.prepare(
+      `SELECT a.id application_id,a.${m.candidate} candidate_id,cp.cv_url,cp.full_name
+       FROM applications a
+       JOIN jobs j ON j.id=a.job_id
+       JOIN users cu ON cu.id=a.${m.candidate}
+       LEFT JOIN candidate_profiles cp ON cp.user_id=cu.id
+       WHERE a.id=? AND j.company_id=? LIMIT 1`
+    ).bind(b.application_id,u.company_id).first<any>();
+    if(!r)return c.json({error:"application_not_found"},404);
+    if(!r.cv_url)return c.json({error:"cv_file_missing"},404);
+    const filename=String(r.cv_url).split("/").pop()||"cv";
+    const lower=filename.toLowerCase();
+    const mime=lower.endsWith(".pdf")?"application/pdf":lower.endsWith(".docx")?"application/vnd.openxmlformats-officedocument.wordprocessingml.document":"text/plain";
+    const data=await extractCvWithOpenAI(c,r.cv_url,filename,mime);
+    const summary=String(data.summary||"").slice(0,10000);
+    const skills=JSON.stringify(data.skills||[]);
+    const languages=JSON.stringify(data.languages||[]);
+    const history=JSON.stringify(data.work_history||[]);
+    const achievements=JSON.stringify(data.achievements||[]);
+    const headline=String(data.headline||"").slice(0,500);
+    const currentPosition=String(data.current_position||"").slice(0,500);
+    const education=String(data.education||"").slice(0,1000);
+    const cols=await c.env.DB.prepare("PRAGMA table_info(candidate_profiles)").all<any>();
+    const cs=new Set((cols.results||[]).map((x:any)=>x.name));
+    const sets:string[]=[];const vals:any[]=[];
+    const add=(col:string,val:any)=>{if(cs.has(col)){sets.push(`${col}=?`);vals.push(val)}};
+    add("education",education);add("experience_years",Number(data.experience_years||0));add("current_position",currentPosition);
+    add("skills",skills);add("languages",languages);add("headline",headline);add("summary",summary);
+    add("updated_at",new Date().toISOString());
+    if(sets.length){
+      vals.push(r.candidate_id);
+      await c.env.DB.prepare(`UPDATE candidate_profiles SET ${sets.join(",")} WHERE user_id=?`).bind(...vals).run();
+    }
+    return c.json({ok:true,application_id:r.application_id,filename,extraction:data});
+  }catch(e:any){
+    const msg=String(e?.message||e);
+    const status=msg==="ai_not_configured"?503:msg==="cv_file_not_found"?404:500;
+    return c.json({error:msg==="ai_not_configured"?"ai_not_configured":"cv_extraction_failed",detail:msg},status);
+  }
+});
+
+app.post("/api/ai/screen",async c=>{
+  try{
+    const u=await currentUser(c);if(!u)return c.json({error:"unauthorized",stage:"ai_screen_auth"},401);
+    if(!u.company_id)return c.json({error:"company_context_missing"},400);
+    if(!c.env.OPENAI_API_KEY)return c.json({error:"ai_not_configured",message:"Set OPENAI_API_KEY as a Worker secret."},503);
+    const b=await c.req.json<any>(),m=await appMeta(c.env.DB);if(!m.candidate)return c.json({error:"applications_missing_candidate_key"},500);
+    const r=await c.env.DB.prepare(`SELECT a.id,j.title,j.description,cu.name,cp.summary,cp.skills,cp.experience_years,cp.education,cp.current_position,cp.languages,cp.headline FROM applications a JOIN jobs j ON j.id=a.job_id JOIN users cu ON cu.id=a.${m.candidate} LEFT JOIN candidate_profiles cp ON cp.user_id=cu.id WHERE a.id=? AND j.company_id=? LIMIT 1`).bind(b.application_id,u.company_id).first<any>();
+    if(!r)return c.json({error:"application_not_found"},404);
+    const schema={type:"object",additionalProperties:false,properties:{overall_score:{type:"integer",minimum:0,maximum:100},summary:{type:"string"},matched_skills:{type:"array",items:{type:"string"}},missing_skills:{type:"array",items:{type:"string"}},evidence:{type:"array",items:{type:"string"}},areas_to_review:{type:"array",items:{type:"string"}},breakdown:{type:"object",additionalProperties:false,properties:{skills_match:{type:"integer",minimum:0,maximum:50},experience:{type:"integer",minimum:0,maximum:25},role_relevance:{type:"integer",minimum:0,maximum:15},profile_completeness:{type:"integer",minimum:0,maximum:10}},required:["skills_match","experience","role_relevance","profile_completeness"]},recommendation:{type:"string"},interview_questions:{type:"array",items:{type:"string"}}},required:["overall_score","summary","matched_skills","missing_skills","evidence","areas_to_review","breakdown","recommendation","interview_questions"]};
+    const prompt=`You are an expert recruitment screening engine. Compare the JOB REQUIREMENTS with the CANDIDATE CV evidence. IMPORTANT: Do not extract ordinary prose words from the job description as skills. Words such as position, department, location, direct, general, work, description, responsibility, etc. are NOT skills. Only return genuine job-relevant competencies, tools, certifications, domain knowledge, or clearly stated role requirements. Matched skills must be explicitly evidenced in the CV. Missing skills means requirements present in the job but not evidenced in the CV; do not claim a skill is missing if the job never requires it. Score transparently: skills_match max 50, experience max 25, role_relevance max 15, profile_completeness max 10. overall_score MUST equal the sum of those four breakdown values. Use only job-relevant evidence. Never infer protected traits or personal data. Do not use candidate name in scoring.\n\nJOB TITLE: ${r.title}\nJOB DESCRIPTION: ${String(r.description||"").slice(0,16000)}\n\nCANDIDATE CV PROFILE:\nHEADLINE=${r.headline||""}\nSUMMARY=${r.summary||""}\nEDUCATION=${r.education||""}\nCURRENT_POSITION=${r.current_position||""}\nSKILLS=${r.skills||""}\nLANGUAGES=${r.languages||""}\nEXPERIENCE_YEARS=${r.experience_years||0}`;
+    const resp=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${c.env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:c.env.OPENAI_MODEL||"gpt-5.6",store:false,instructions:"Return structured JSON only.",input:prompt,text:{format:{type:"json_schema",name:"candidate_screening",strict:true,schema}}})});
+    if(!resp.ok){const t=await resp.text();return c.json({error:"ai_request_failed",status:resp.status,detail:t.slice(0,500)},502)}
+    const d=await resp.json() as any,content=d?.output?.flatMap((x:any)=>x?.content||[]).find((x:any)=>x?.type==="output_text")?.text;if(!content)return c.json({error:"empty_ai_response"},502);
+    let result:any;try{result=JSON.parse(content)}catch{return c.json({error:"invalid_ai_json"},502)}
+    const bd=result.breakdown||{};const computed=Number(bd.skills_match||0)+Number(bd.experience||0)+Number(bd.role_relevance||0)+Number(bd.profile_completeness||0);result.overall_score=Math.max(0,Math.min(100,computed));result.status=result.overall_score>=85?"Strong Match":result.overall_score>=70?"Potential Match":"Low Match";
+    if(m.cs.has("ai_score"))await c.env.DB.prepare("UPDATE applications SET ai_score=?,status=?,ai_summary=?,ai_strengths=?,ai_weaknesses=?,ai_matched_skills=?,ai_missing_skills=?,ai_recommendation=?,ai_interview_questions=?,ai_model=?,ai_screened_at=CURRENT_TIMESTAMP WHERE id=?").bind(result.overall_score,result.status,result.summary,JSON.stringify(result.evidence),JSON.stringify(result.areas_to_review),JSON.stringify(result.matched_skills),JSON.stringify(result.missing_skills),result.recommendation,JSON.stringify(result.interview_questions),c.env.OPENAI_MODEL||"gpt-5.6",b.application_id).run();
+    else if(m.cs.has("score"))await c.env.DB.prepare("UPDATE applications SET score=?,status=? WHERE id=?").bind(result.overall_score,result.status,b.application_id).run();
+    else if(m.cs.has("status"))await c.env.DB.prepare("UPDATE applications SET status=? WHERE id=?").bind(result.status,b.application_id).run();
+    await audit(c,u,"screening.ai",b.application_id);return c.json(result);
+  }catch(e:any){return c.json({error:"ai_screen_failed",detail:String(e?.message||e)},500)}
+});
+
+app.get("/", (c) => c.html(`<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${c.env.APP_NAME}</title>
+<style>
+:root{font-family:Inter,system-ui,-apple-system,sans-serif;color:#10213b;background:#f6f8fb}body{margin:0}header{background:#fff;border-bottom:1px solid #e5eaf2;padding:18px 28px;display:flex;justify-content:space-between;align-items:center}main{max-width:1180px;margin:28px auto;padding:0 20px}.brand{display:flex;align-items:center;gap:12px;font-weight:800;font-size:22px}.brand img{width:42px;height:42px;object-fit:contain}.muted{color:#667085}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.card{background:#fff;border:1px solid #e4e9f1;border-radius:16px;padding:20px;box-shadow:0 3px 14px #132b4a0a;margin-bottom:18px}.metric b{font-size:30px;display:block;margin-top:8px}.tabs{display:flex;gap:8px;margin:18px 0}.tabs button,.btn{border:0;border-radius:10px;padding:10px 14px;background:#0b66ff;color:white;cursor:pointer}.tabs button.secondary,.btn.secondary{background:#edf2f8;color:#20304a}.hidden{display:none}.auth{max-width:480px;margin:60px auto}.input{width:100%;box-sizing:border-box;padding:12px;border:1px solid #d7deea;border-radius:10px;margin:6px 0 12px}.row{display:grid;grid-template-columns:1fr 1fr;gap:12px}.table{width:100%;border-collapse:collapse}.table th,.table td{text-align:left;padding:11px;border-bottom:1px solid #edf0f5}.pill{display:inline-block;padding:4px 8px;border-radius:999px;background:#edf4ff}.danger{color:#b42318}.logo{max-width:58px;max-height:58px}@media(max-width:800px){.grid,.row{grid-template-columns:1fr}.grid{grid-template-columns:1fr 1fr}}
+.upload-options{display:grid;grid-template-columns:1fr 1fr;gap:12px;width:100%}.upload-option{border:1px solid #d7deea;border-radius:10px;padding:12px;display:flex;flex-direction:column;gap:8px;font-weight:600}.upload-option input{width:100%}@media(max-width:700px){.upload-options{grid-template-columns:1fr}}
+.screen-result-card{border:1px solid #dbe3ef;border-radius:16px;background:#fff;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,.06)}
+.screen-result-top{display:flex;justify-content:space-between;align-items:center;gap:20px;padding:22px 24px;border-bottom:1px solid #e7edf5}
+.screen-eyebrow{font-size:11px;font-weight:700;letter-spacing:.12em;color:#64748b;margin-bottom:5px}
+.screen-result-title{font-size:20px;font-weight:750;color:#0f172a}
+.screen-score{min-width:100px;text-align:center;padding:10px 14px;border-radius:14px}
+.screen-score-number{font-size:30px;font-weight:800;line-height:1}
+.screen-score-label{font-size:12px;color:#64748b;margin-left:3px}
+.score-strong{background:#ecfdf3;color:#047857}.score-good{background:#eff6ff;color:#1d4ed8}.score-review{background:#fff7ed;color:#c2410c}.score-low{background:#fef2f2;color:#b91c1c}.score-na{background:#f1f5f9;color:#64748b}
+.screen-status-row{padding:14px 24px 0}
+.screen-status{display:inline-flex;padding:6px 11px;border-radius:999px;font-size:12px;font-weight:700}
+.status-strong{background:#dcfce7;color:#166534}.status-potential{background:#dbeafe;color:#1d4ed8}.status-low{background:#fee2e2;color:#b91c1c}.status-review{background:#f1f5f9;color:#475569}
+.screen-section{padding:20px 24px 0}
+.screen-section-title{font-size:13px;font-weight:750;color:#334155;margin-bottom:9px}
+.screen-summary{font-size:14px;line-height:1.65;color:#475569}
+.screen-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:20px 24px 0}
+.screen-panel{border:1px solid #e2e8f0;border-radius:12px;padding:16px;background:#f8fafc}
+.screen-list{margin:0;padding-left:20px;color:#475569;font-size:13px;line-height:1.7}
