@@ -17,5 +17,7 @@
     "rule-based screening",
     "OpenAI Responses API screening",
     "recruiter dashboard"
-  ]
+  ],
+  "version": "6.2",
+  "schema": "existing-indo-talent-db"
 }
