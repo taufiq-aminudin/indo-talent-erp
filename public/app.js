@@ -27,11 +27,53 @@ function resultList(v){
   if(typeof a==="string"){try{a=JSON.parse(a)}catch{a=a.split(/\n|,/).map(x=>x.trim()).filter(Boolean)}}
   return Array.isArray(a)?a.filter(Boolean):[]
 }
+
+(function(){
+  if(document.getElementById('screening-result-ui-style'))return;
+  const s=document.createElement('style');s.id='screening-result-ui-style';
+  s.textContent=`
+    #resultText{white-space:normal!important}
+    .screen-result-card{border:1px solid #dbe4f0;border-radius:16px;background:#fff;overflow:hidden;box-shadow:0 6px 20px rgba(15,23,42,.06)}
+    .screen-result-top{padding:22px 24px;display:flex;justify-content:space-between;align-items:center;gap:18px;border-bottom:1px solid #e8edf5}
+    .screen-eyebrow{font-size:11px;letter-spacing:.08em;font-weight:800;color:#64748b;margin-bottom:5px}
+    .screen-result-title{font-size:21px;font-weight:750;color:#102a4c}
+    .screen-score{min-width:110px;text-align:center;padding:10px 14px;border-radius:14px;background:#f8fafc}
+    .screen-score-number{font-size:34px;font-weight:800;line-height:1;color:#102a4c}.screen-score-label{font-size:13px;color:#64748b}
+    .score-strong{background:#ecfdf5}.score-strong .screen-score-number{color:#047857}
+    .score-good{background:#eff6ff}.score-good .screen-score-number{color:#1d4ed8}
+    .score-review{background:#fff7ed}.score-review .screen-score-number{color:#c2410c}
+    .score-low{background:#fff1f2}.score-low .screen-score-number{color:#be123c}
+    .screen-status-row{padding:14px 24px 0}.screen-status{display:inline-flex;padding:6px 11px;border-radius:999px;font-size:12px;font-weight:700}
+    .status-strong{background:#dcfce7;color:#166534}.status-potential{background:#dbeafe;color:#1d4ed8}.status-low{background:#fee2e2;color:#991b1b}.status-review{background:#f1f5f9;color:#475569}
+    .screen-section{padding:20px 24px 0}.screen-section-title{font-size:13px;font-weight:750;color:#17365d;margin-bottom:9px}
+    .screen-summary,.screen-recommendation{font-size:14px;line-height:1.65;color:#475569;background:#f8fafc;border:1px solid #e2e8f0;border-radius:11px;padding:13px 15px}
+    .screen-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;padding:20px 24px 0}.screen-panel{border:1px solid #e2e8f0;border-radius:12px;padding:15px}
+    .screen-list{margin:0;padding-left:20px;color:#475569;font-size:13px;line-height:1.7}.screen-empty{color:#94a3b8;font-size:13px}
+    .skill-wrap{display:flex;flex-wrap:wrap;gap:7px}.skill-chip{padding:6px 9px;border-radius:999px;font-size:12px;font-weight:650}.skill-match{background:#ecfdf5;color:#047857}.skill-missing{background:#fff1f2;color:#be123c}
+    .screen-meta{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}.screen-meta div{padding:11px;border:1px solid #e2e8f0;border-radius:10px}.screen-meta span{display:block;font-size:11px;color:#94a3b8;margin-bottom:4px}.screen-meta strong{font-size:13px;color:#334155}
+    .screen-recommendation{margin:20px 24px 24px;background:#f8fafc}
+    .screen-error-card{border:1px solid #fecaca;border-radius:16px;background:#fff;overflow:hidden;box-shadow:0 6px 20px rgba(127,29,29,.05)}
+    .screen-error-head{padding:20px 24px;background:#fff7f7;border-bottom:1px solid #fee2e2;display:flex;justify-content:space-between;align-items:center;gap:12px}
+    .screen-error-title{font-size:19px;font-weight:750;color:#991b1b}.screen-error-sub{font-size:12px;color:#9f1239;margin-top:4px}
+    .screen-error-icon{width:36px;height:36px;border-radius:50%;background:#fee2e2;color:#b91c1c;display:flex;align-items:center;justify-content:center;font-weight:800}
+    .screen-error-body{padding:20px 24px}.screen-error-message{font-size:14px;line-height:1.6;color:#7f1d1d}
+    .screen-error-code{display:inline-block;margin-top:12px;padding:5px 9px;border-radius:7px;background:#fef2f2;color:#991b1b;font:600 12px ui-monospace,SFMono-Regular,Menlo,monospace}
+    .screen-error-action{margin-top:14px;padding:12px 14px;border-radius:10px;background:#f8fafc;border:1px solid #e2e8f0;color:#475569;font-size:12px}
+    @media(max-width:700px){.screen-result-top{align-items:flex-start}.screen-grid,.screen-meta{grid-template-columns:1fr}}
+  `;
+  document.head.appendChild(s);
+})();
+
 function renderScreeningResult(data){
   const box=$('#result'),out=$('#resultText'); box.classList.remove('hidden');
   if(data&&data.error){
     const detail=data.detail||data.message||data.error;
-    out.innerHTML='<div class="screen-error"><div class="screen-error-title">Screening could not be completed</div><div class="screen-error-code">'+resultEsc(data.error)+'</div><div class="screen-error-detail">'+resultEsc(detail)+'</div></div>';
+    let title='AI screening could not be completed', message='The AI service could not process this screening request.', action='Please check the AI service configuration and available credits, then try again.';
+    if(String(data.error)==='cv_not_extracted'){title='CV extraction required';message='This candidate has not been extracted yet.';action='Click “Extract CV” first, then run AI Screening.'}
+    else if(String(data.error)==='ai_not_configured'){title='AI service is not configured';message='No AI provider is currently configured for this workspace.';action='Add a valid AI API configuration before running screening.'}
+    else if(String(data.error)==='ai_request_failed'){title='AI screening temporarily unavailable';message='The AI provider rejected or could not complete this request.';action='Check API credits/quota and configuration, then retry. No candidate score was changed.'}
+    else if(String(data.error)==='cv_extraction_failed'){title='CV extraction failed';message='The CV could not be processed by the extraction service.';action='Retry extraction after the AI service is available.'}
+    out.innerHTML='<div class="screen-error-card"><div class="screen-error-head"><div><div class="screen-error-title">'+resultEsc(title)+'</div><div class="screen-error-sub">AI Screening</div></div><div class="screen-error-icon">!</div></div><div class="screen-error-body"><div class="screen-error-message">'+resultEsc(message)+'</div><div class="screen-error-action">'+resultEsc(action)+'</div><div class="screen-error-code">'+resultEsc(data.error)+'</div></div></div>';
     return;
   }
   const score=Number(data?.overall_score??data?.ai_score), hasScore=Number.isFinite(score);
@@ -151,7 +193,7 @@ $('#candidateForm').onsubmit=async e=>{
 }
 window.rule=async id=>{try{const r=await api('/api/screenings/rule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({application_id:id})});showResult(r);await refresh();loadApps()}catch(e){showResult({error:e.message})}}
 window.ai=async id=>{try{const r=await api('/api/ai/screen',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({application_id:id})});showResult(r);await refresh();loadApps()}catch(e){showResult({error:e.message})}}
-function showResult(x){$('#result').classList.remove('hidden');$('#resultText').textContent=JSON.stringify(x,null,2)}
+function showResult(x){renderScreeningResult(x)}
 function esc(s){return String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]))}
 async function boot(){try{const r=await api('/api/auth/me');$('#auth').classList.add('hidden');$('#app').classList.remove('hidden');$('#who').textContent=r.user.name+' · '+(r.user.company_name||'');await refresh();$('#authMsg').textContent=''}catch(e){$('#authMsg').textContent='Login/session error: '+e.message;$('#auth').classList.remove('hidden');$('#app').classList.add('hidden')}}
 boot();
