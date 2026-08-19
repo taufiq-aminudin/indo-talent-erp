@@ -7,7 +7,36 @@ $('#toggleAuth').onclick=e=>{e.preventDefault();setMode()};
 $('#authForm').onsubmit=async e=>{e.preventDefault();$('#authMsg').textContent='Working...';try{const path=registerMode?'/api/auth/register':'/api/auth/login';const body=registerMode?{organization_name:$('#org').value,name:$('#name').value,email:$('#email').value,password:$('#password').value}:{email:$('#email').value,password:$('#password').value};const r=await api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});$('#auth').classList.add('hidden');$('#app').classList.remove('hidden');$('#who').textContent=r.user.name+' · '+(r.user.company_name||'');$('#authMsg').textContent='Loading dashboard...';try{await refresh();$('#authMsg').textContent=''}catch(e){$('#authMsg').textContent='Dashboard error: '+e.message}}catch(err){$('#authMsg').textContent=err.message}}
 $('#logout').onclick=async()=>{await api('/api/auth/logout',{method:'POST'});location.reload()};
 $$('.tabs button').forEach(b=>b.onclick=()=>{$$('.tabs button').forEach(x=>x.classList.add('secondary'));b.classList.remove('secondary');$$('.tab').forEach(x=>x.classList.add('hidden'));$('#'+b.dataset.tab).classList.remove('hidden');if(b.dataset.tab==='jobs')loadJobs();if(b.dataset.tab==='candidates')loadCandidates();if(b.dataset.tab==='applications')loadApps()});
-async function loadJobs(){const jobs=await api('/api/jobs');$('#jobsBody').innerHTML=jobs.map(j=>`<tr><td>${esc(j.title)}</td><td>${esc(j.location||'-')}</td><td>${new Date(j.created_at).toLocaleString()}</td></tr>`).join('');$('#candidateJob').innerHTML='<option value="">Attach to job (optional)</option>'+jobs.map(j=>`<option value="${j.id}">${esc(j.title)}</option>`).join('')}
+async function loadJobs(){
+  const jobs=await api('/api/jobs');
+  window.jobsCache=jobs;
+  $('#jobsBody').innerHTML=jobs.length?jobs.map(j=>`<tr><td><strong>${esc(j.title)}</strong></td><td>${esc(j.location||'-')}</td><td><span class="job-status">${esc(j.status||'open')}</span></td><td>${j.created_at?new Date(j.created_at).toLocaleString():'-'}</td><td><div class="job-actions"><button type="button" class="btn secondary job-action" onclick="editJob('${j.id}')">Edit</button><button type="button" class="btn secondary job-action job-danger" onclick="deleteJob('${j.id}')">Delete</button></div></td></tr>`).join(''):'<tr><td colspan="5" class="job-empty">No active jobs yet. Create your first job above.</td></tr>';
+  $('#candidateJob').innerHTML='<option value="">Attach to job (optional)</option>'+jobs.map(j=>`<option value="${j.id}">${esc(j.title)}</option>`).join('');
+}
+function extractJobRequirements(description){
+  const m=String(description||'').match(/Required skills:\s*([\s\S]*)$/i);
+  if(!m)return '';
+  return m[1].split(/\n/).map(x=>x.replace(/^\s*-\s*/, '').trim()).filter(Boolean).join(', ');
+}
+function startJobEdit(j){
+  $('#editingJobId').value=j.id;$('#jobFormTitle').textContent='Edit job';$('#jobSubmitBtn').textContent='Save changes';$('#jobResetBtn').classList.remove('hidden');$('#cancelJobEdit').classList.remove('hidden');
+  $('#jobTitle').value=j.title||'';$('#jobLocation').value=j.location||'';$('#jobSalary').value=j.salary||'';$('#jobDescription').value=String(j.description||'').replace(/\n\nRequired skills:\n(?:- .*\n?)+$/i,'').trim();$('#jobSkills').value=extractJobRequirements(j.description);
+  $('#jobMsg').textContent='Editing '+j.title;
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+window.editJob=id=>{const j=(window.jobsCache||[]).find(x=>x.id===id);if(j)startJobEdit(j)};
+function resetJobForm(){
+  $('#editingJobId').value='';$('#jobForm').reset();$('#jobFormTitle').textContent='Create job';$('#jobSubmitBtn').textContent='Create job';$('#jobResetBtn').classList.add('hidden');$('#cancelJobEdit').classList.add('hidden');$('#jobMsg').textContent='';
+}
+async function deleteJob(id){
+  const j=(window.jobsCache||[]).find(x=>x.id===id);
+  if(!j)return;
+  const ok=confirm('Delete job "'+j.title+'"?\n\nThe job will be removed from the active Jobs list. Existing candidate applications and screening history will be preserved.');
+  if(!ok)return;
+  try{await api('/api/jobs/'+encodeURIComponent(id),{method:'DELETE'});if($('#editingJobId').value===id)resetJobForm();$('#jobMsg').textContent='Job deleted successfully.';await refresh()}catch(e){$('#jobMsg').textContent='Delete job failed: '+e.message}
+}
+window.deleteJob=deleteJob;
+$('#refreshJobs').onclick=()=>loadJobs();$('#cancelJobEdit').onclick=resetJobForm;$('#jobResetBtn').onclick=resetJobForm;$('#manageJobsBtn').onclick=()=>document.querySelector('.tabs button[data-tab="jobs"]').click();
 async function loadCandidates(){const rows=await api('/api/candidates');$('#candidatesBody').innerHTML=rows.map(x=>'<tr><td>'+esc(x.cv_url||x.full_name||'-')+'</td><td>'+esc(x.job_title||'-')+'</td><td>'+(x.score==null?'-':x.score)+'</td><td><span class="pill">'+esc(x.status||'Uploaded')+'</span></td></tr>').join('')}
 async function loadApps(){
   try{
@@ -131,21 +160,14 @@ async function extractCv(id){
 async function refresh(){const d=await api('/api/dashboard');$('#mJobs').textContent=d.jobs;$('#mCandidates').textContent=d.candidates;$('#mApplications').textContent=d.applications;$('#mStrong').textContent=d.strong_matches;await loadJobs()}
 $('#jobForm').onsubmit=async e=>{
   e.preventDefault();
-  const msg=$('#jobMsg');
-  msg.textContent='Creating job...';
+  const msg=$('#jobMsg');const id=$('#editingJobId').value;
+  msg.textContent=id?'Saving changes...':'Creating job...';
   try{
-    const r=await api('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({
-      title:$('#jobTitle').value,
-      location:$('#jobLocation').value,
-      description:$('#jobDescription').value,
-      requirements:$('#jobSkills').value.split(',').map(x=>x.trim()).filter(Boolean)
-    })});
-    e.target.reset();
-    msg.textContent='Job created successfully.';
+    const body={title:$('#jobTitle').value,location:$('#jobLocation').value,salary:$('#jobSalary').value,description:$('#jobDescription').value,requirements:$('#jobSkills').value.split(',').map(x=>x.trim()).filter(Boolean)};
+    await api(id?('/api/jobs/'+encodeURIComponent(id)):'/api/jobs',{method:id?'PATCH':'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+    resetJobForm();msg.textContent=id?'Job updated successfully.':'Job created successfully.';
     await refresh();
-  }catch(err){
-    msg.textContent='Create job failed: '+err.message;
-  }
+  }catch(err){msg.textContent=(id?'Update job failed: ':'Create job failed: ')+err.message;}
 }
 $('#candidateForm').onsubmit=async e=>{
   e.preventDefault();
