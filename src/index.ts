@@ -69,7 +69,7 @@ async function requireAuth(c:any,next:any){
 async function audit(c:any,u:AuthUser,action:string,entityId?:string){try{const cs=await columns(c.env.DB,"admin_audit_logs");const fields:string[]=[];const vals:any[]=[];const add=(n:string,v:any)=>{if(cs.has(n)){fields.push(n);vals.push(v)}};add("id",id());add("user_id",u.id);add("action",action);add("entity_id",entityId||null);add("company_id",u.company_id);add("created_at",new Date().toISOString());if(fields.length)await c.env.DB.prepare(`INSERT INTO admin_audit_logs(${fields.join(",")}) VALUES(${fields.map(()=>"?").join(",")})`).bind(...vals).run()}catch{}}
 async function appMeta(db:D1Database){const cs=await columns(db,"applications");return {cs,candidate:cs.has("candidate_id")?"candidate_id":cs.has("user_id")?"user_id":null,tenant:cs.has("company_id")?"company_id":cs.has("organization_id")?"organization_id":null}}
 async function createApplication(c:any,u:AuthUser,jobId:string,candidateUserId:string){const m=await appMeta(c.env.DB);if(!m.candidate)throw new Error("applications_missing_candidate_key");const f=["id","job_id",m.candidate],v:any[]=[id(),jobId,candidateUserId];if(m.tenant){f.push(m.tenant);v.push(u.company_id)}if(m.cs.has("status")){f.push("status");v.push("Review")}if(m.cs.has("score")){f.push("score");v.push(0)}await c.env.DB.prepare(`INSERT INTO applications(${f.join(",")}) VALUES(${f.map(()=>"?").join(",")})`).bind(...v).run()}
-app.get("/api/health",async c=>{try{await c.env.DB.prepare("SELECT 1").first();return c.json({ok:true,app:c.env.APP_NAME,version:"v6.32-job-management",database:"indo-talent-db",storage:"r2"})}catch{return c.json({ok:false,error:"database_unavailable"},503)}});
+app.get("/api/health",async c=>{try{await c.env.DB.prepare("SELECT 1").first();return c.json({ok:true,app:c.env.APP_NAME,version:"v6.33-job-actions-screening",database:"indo-talent-db",storage:"r2"})}catch{return c.json({ok:false,error:"database_unavailable"},503)}});
 app.post("/api/auth/register",async c=>{
   try{
     const b=await c.req.json<any>();
@@ -210,6 +210,16 @@ app.delete("/api/jobs/:id",async c=>{
   }catch(e:any){
     return c.json({error:"job_delete_failed",detail:String(e?.message||e)},500);
   }
+});
+
+// Compatibility endpoints: some managed proxies are stricter with PATCH/DELETE.
+app.post("/api/jobs/:id/update",async c=>{
+  const req=new Request(c.req.raw.url.replace(`/api/jobs/${c.req.param("id")}/update`,`/api/jobs/${c.req.param("id")}`),{method:"PATCH",headers:c.req.raw.headers,body:await c.req.raw.clone().text()});
+  return app.fetch(req,c.env);
+});
+app.post("/api/jobs/:id/delete",async c=>{
+  const req=new Request(c.req.raw.url.replace(`/api/jobs/${c.req.param("id")}/delete`,`/api/jobs/${c.req.param("id")}`),{method:"DELETE",headers:c.req.raw.headers});
+  return app.fetch(req,c.env);
 });
 
 app.post("/api/jobs",async c=>{
@@ -375,15 +385,20 @@ app.post("/api/screenings/rule",async c=>{
        WHERE a.id=? AND j.company_id=? LIMIT 1`
     ).bind(b.application_id,u.company_id).first<any>();
     if(!r)return c.json({error:"application_not_found"},404);
+    const hasCvEvidence=Boolean(String(r.skills||r.summary||r.current_position||r.education||r.languages||"").trim() || Number(r.experience_years||0)>0);
+    if(!hasCvEvidence)return c.json({error:"cv_not_extracted",message:"Extract the CV before running Rule Screening."},409);
 
     const norm=(v:any)=>String(v||"").toLowerCase().replace(/&/g," and ").replace(/[^a-z0-9+#.\-\s]/g," ").replace(/\s+/g," ").trim();
     const jobText=norm(`${r.title||""} ${r.description||""}`);
     const profileText=norm(`${r.summary||""} ${r.current_position||""} ${r.skills||""} ${r.education||""} ${r.languages||""}`);
+    const explicitSkills=String(r.description||"").match(/Required skills:\s*([\s\S]*)$/i)?.[1]||"";
+    const explicitSkillTokens=explicitSkills.split(/[,\n;|]/).map((x:string)=>norm(x.replace(/^[-*•]\s*/,""))).filter((x:string)=>x.length>=3);
 
     // Only compare recognised job-relevant competencies. Do NOT turn ordinary JD words
     // such as "posisi", "departemen", "lokasi", "atasan", "langsung", etc. into skills.
     const skillMap:any[]=[
       ["accounting",["accounting","akuntansi","financial accounting"]],
+      ["financial management",["financial management","manajemen keuangan","finance management"]],
       ["financial reporting",["financial reporting","financial report","laporan keuangan","laporan finansial"]],
       ["financial analysis",["financial analysis","analisis keuangan"]],
       ["budgeting",["budgeting","budget preparation","penyusunan anggaran","anggaran"]],
@@ -405,6 +420,11 @@ app.post("/api/screenings/rule",async c=>{
       ["team management",["team management","people management","manajemen tim","memimpin tim"]],
       ["project management",["project management","manajemen proyek"]],
       ["communication",["communication","komunikasi"]],
+      ["analytical thinking",["analytical thinking","analytical skills","berpikir analitis","analisis"]],
+      ["attention to detail",["attention to detail","detail oriented","detail-oriented","ketelitian"]],
+      ["decision making",["decision making","decision-making","pengambilan keputusan"]],
+      ["integrity",["integrity","integritas"]],
+      ["time management",["time management","manajemen waktu"]],
       ["problem solving",["problem solving","pemecahan masalah"]],
       ["risk management",["risk management","manajemen risiko"]],
       ["procurement",["procurement","purchasing","pengadaan"]],
@@ -413,7 +433,13 @@ app.post("/api/screenings/rule",async c=>{
       ["recruitment",["recruitment","rekrutmen"]]
     ];
     const contains=(text:string,phrase:string)=>{const p=norm(phrase);return p&&(` ${text} `).includes(` ${p} `)};
-    const requirements=skillMap.filter(([,aliases])=>aliases.some((x:string)=>contains(jobText,x))).map(([name])=>name);
+    const requirements=[...new Set([
+      ...skillMap.filter(([,aliases])=>aliases.some((x:string)=>contains(jobText,x))).map(([name])=>name),
+      ...explicitSkillTokens.flatMap((token:string)=>{
+        const hit=skillMap.find(([,aliases])=>aliases.some((x:string)=>contains(token,x)||contains(x,token)));
+        return hit?[hit[0]]:[];
+      })
+    ])];
     const candidateSkills=skillMap.filter(([,aliases])=>aliases.some((x:string)=>contains(profileText,x))).map(([name])=>name);
     const matched=requirements.filter((x:string)=>candidateSkills.includes(x));
     const missing=requirements.filter((x:string)=>!candidateSkills.includes(x));
@@ -696,8 +722,8 @@ function renderProfessionalScreeningResult(raw){
 <h2>Screening result</h2><div id="resultText"></div></div></section>
 </main></div>
 <style>
-.section-head{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:14px}.section-head h2{margin-bottom:4px}.form-actions{display:flex;gap:8px;align-items:center;margin-top:12px}.table-wrap{overflow:auto}.job-actions{display:flex;gap:7px;flex-wrap:wrap}.job-action{white-space:nowrap}.job-status{display:inline-flex;padding:5px 9px;border-radius:999px;background:#eef4ff;color:#1459c7;font-size:12px;font-weight:700}.job-status.closed{background:#f1f5f9;color:#64748b}.job-empty{text-align:center;color:#94a3b8;padding:28px}.job-danger{color:#b91c1c!important;border-color:#fecaca!important;background:#fff7f7!important}@media(max-width:700px){.section-head{align-items:flex-start;flex-direction:column}.job-actions{flex-direction:column;align-items:stretch}.job-action{width:100%}}</style>
-<script src="/app.js?v=632" defer></script></body></html>`));
+.section-head{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:14px}.section-head h2{margin-bottom:4px}.form-actions{display:flex;gap:8px;align-items:center;margin-top:12px}.table-wrap{overflow:auto}.job-actions{display:flex;gap:8px;flex-wrap:wrap}.job-action{white-space:nowrap;min-width:72px}.job-status{display:inline-flex;padding:5px 9px;border-radius:999px;background:#ecfdf3;color:#047857;font-size:12px;font-weight:750;text-transform:capitalize}.job-status.closed{background:#f1f5f9;color:#64748b}.job-empty{text-align:center;color:#64748b;padding:34px}.job-empty strong{color:#17365d;font-size:14px}.job-empty span{display:inline-block;margin-top:4px;font-size:12px}.job-danger{color:#b91c1c!important;border-color:#fecaca!important;background:#fff7f7!important}.job-danger:hover{background:#fee2e2!important}.job-title-cell{display:flex;flex-direction:column;gap:4px}.job-title-cell strong{color:#102a43;font-size:14px}.job-title-cell span{font-size:11px;color:#94a3b8}.screen-loading{display:flex;align-items:center;gap:12px;padding:18px;border:1px solid #dbe5f0;background:#f8fafc;border-radius:12px;color:#334155}.screen-loading strong{display:block}.screen-loading small{display:block;color:#64748b;margin-top:3px}.loader-dot{width:12px;height:12px;border-radius:50%;border:2px solid #bfdbfe;border-top-color:#1769e0;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}@media(max-width:700px){.section-head{align-items:flex-start;flex-direction:column}.job-actions{flex-direction:row;align-items:stretch}.job-action{width:auto}}</style>
+<script src="/app.js?v=633" defer></script></body></html>`));
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));
 
