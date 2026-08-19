@@ -519,63 +519,46 @@ async function loadApps(){
   }
 }
 
-function resultEsc(v){
-  return esc(v==null?"":String(v));
-}
+function resultEsc(v){return esc(v==null?"":String(v))}
 function resultList(v){
   let a=v;
-  if(typeof a==="string"){
-    try{a=JSON.parse(a)}catch{a=a.split(/\n|,/).map(x=>x.trim()).filter(Boolean)}
-  }
-  return Array.isArray(a)?a.filter(Boolean):[];
+  if(typeof a==="string"){try{a=JSON.parse(a)}catch{a=a.split(/\n|,/).map(x=>x.trim()).filter(Boolean)}}
+  return Array.isArray(a)?a.filter(Boolean):[]
 }
 function renderScreeningResult(data){
-  const box=$('#result');
-  const out=$('#resultText');
-  box.classList.remove('hidden');
-
-  if(data && data.error){
+  const box=$('#result'),out=$('#resultText'); box.classList.remove('hidden');
+  if(data&&data.error){
     const detail=data.detail||data.message||data.error;
     out.innerHTML='<div class="screen-error"><div class="screen-error-title">Screening could not be completed</div><div class="screen-error-code">'+resultEsc(data.error)+'</div><div class="screen-error-detail">'+resultEsc(detail)+'</div></div>';
     return;
   }
-
-  const score=Number(data?.overall_score ?? data?.ai_score);
-  const hasScore=Number.isFinite(score);
+  const score=Number(data?.overall_score??data?.ai_score), hasScore=Number.isFinite(score);
   const status=String(data?.status||data?.ai_recommendation||"Review");
   const summary=String(data?.summary||data?.ai_summary||"");
   const strengths=resultList(data?.strengths||data?.ai_strengths);
   const gaps=resultList(data?.gaps||data?.weaknesses||data?.ai_weaknesses);
   const matched=resultList(data?.matched_skills||data?.ai_matched_skills);
   const missing=resultList(data?.missing_skills||data?.ai_missing_skills);
-  const education=String(data?.education||"");
-  const position=String(data?.current_position||"");
+  const education=String(data?.education||""),position=String(data?.current_position||"");
   const experience=data?.experience_years;
   const recommendation=String(data?.recommendation||data?.ai_recommendation||"");
-
   const scoreClass=!hasScore?"score-na":score>=85?"score-strong":score>=70?"score-good":score>=50?"score-review":"score-low";
   const statusClass=/strong/i.test(status)?"status-strong":/potential/i.test(status)?"status-potential":/low/i.test(status)?"status-low":"status-review";
-
-  const listHtml=(items,empty)=>{
-    if(!items.length)return '<div class="screen-empty">'+resultEsc(empty)+'</div>';
-    return '<ul class="screen-list">'+items.map(x=>'<li>'+resultEsc(x)+'</li>').join('')+'</ul>';
-  };
-
-  out.innerHTML=
-    '<div class="screen-result-card">'+
-      '<div class="screen-result-top">'+
-        '<div><div class="screen-eyebrow">AI SCREENING RESULT</div><div class="screen-result-title">Candidate assessment</div></div>'+
-        '<div class="screen-score '+scoreClass+'"><span class="screen-score-number">'+(hasScore?resultEsc(score):'—')+'</span><span class="screen-score-label">/ 100</span></div>'+
-      '</div>'+
-      '<div class="screen-status-row"><span class="screen-status '+statusClass+'">'+resultEsc(status)+'</span></div>'+
-      (summary?'<div class="screen-section"><div class="screen-section-title">Assessment Summary</div><div class="screen-summary">'+resultEsc(summary)+'</div></div>':'')+
-      '<div class="screen-grid">'+
-        '<div class="screen-panel"><div class="screen-section-title">Strengths</div>'+listHtml(strengths,'No strengths identified yet.')+'</div>'+
-        '<div class="screen-panel"><div class="screen-section-title">Areas to Review</div>'+listHtml(gaps.length?gaps:missing,'No gaps identified yet.')+'</div>'+
-      '</div>'+
-      ((matched.length||missing.length)?'<div class="screen-section"><div class="screen-section-title">Skills Match</div><div class="skill-wrap">'+matched.map(x=>'<span class="skill-chip skill-match">✓ '+resultEsc(x)+'</span>').join('')+missing.map(x=>'<span class="skill-chip skill-missing">× '+resultEsc(x)+'</span>').join('')+'</div></div>':'')+
-      ((education||position||experience!=null)?'<div class="screen-section"><div class="screen-section-title">Profile Snapshot</div><div class="screen-meta">'+(position?'<div><span>Current Position</span><strong>'+resultEsc(position)+'</strong></div>':'')+(experience!=null?'<div><span>Experience</span><strong>'+resultEsc(experience)+' years</strong></div>':'')+(education?'<div><span>Education</span><strong>'+resultEsc(education)+'</strong></div>':'')+'</div></div>':'')+
-      (recommendation?'<div class="screen-recommendation"><div class="screen-section-title">Recommendation</div><div>'+resultEsc(recommendation)+'</div></div>':'')+
+  const listHtml=(items,empty)=>items.length?'<ul class="screen-list">'+items.map(x=>'<li>'+resultEsc(x)+'</li>').join('')+'</ul>':'<div class="screen-empty">'+resultEsc(empty)+'</div>';
+  out.innerHTML='<div class="screen-result-card">'+
+    '<div class="screen-result-top"><div><div class="screen-eyebrow">AI SCREENING RESULT</div><div class="screen-result-title">Candidate assessment</div></div>'+
+    '<div class="screen-score '+scoreClass+'"><span class="screen-score-number">'+(hasScore?resultEsc(score):'—')+'</span><span class="screen-score-label">/ 100</span></div></div>'+
+    '<div class="screen-status-row"><span class="screen-status '+statusClass+'">'+resultEsc(status)+'</span></div>'+
+    (summary?'<div class="screen-section"><div class="screen-section-title">Assessment Summary</div><div class="screen-summary">'+resultEsc(summary)+'</div></div>':'')+
+    '<div class="screen-grid"><div class="screen-panel"><div class="screen-section-title">Strengths</div>'+listHtml(strengths,'No strengths identified yet.')+'</div>'+
+    '<div class="screen-panel"><div class="screen-section-title">Areas to Review</div>'+listHtml(gaps.length?gaps:missing,'No gaps identified yet.')+'</div></div>'+
+    ((matched.length||missing.length)?'<div class="screen-section"><div class="screen-section-title">Skills Match</div><div class="skill-wrap">'+matched.map(x=>'<span class="skill-chip skill-match">✓ '+resultEsc(x)+'</span>').join('')+missing.map(x=>'<span class="skill-chip skill-missing">× '+resultEsc(x)+'</span>').join('')+'</div></div>':'')+
+    ((education||position||experience!=null)?'<div class="screen-section"><div class="screen-section-title">Profile Snapshot</div><div class="screen-meta">'+
+      (position?'<div><span>Current Position</span><strong>'+resultEsc(position)+'</strong></div>':'')+
+      (experience!=null?'<div><span>Experience</span><strong>'+resultEsc(experience)+' years</strong></div>':'')+
+      (education?'<div><span>Education</span><strong>'+resultEsc(education)+'</strong></div>':'')+
+      '</div></div>':'')+
+    (recommendation?'<div class="screen-recommendation"><div class="screen-section-title">Recommendation</div><div>'+resultEsc(recommendation)+'</div></div>':'')+
     '</div>';
 }
 
