@@ -406,12 +406,12 @@ async function extractCvWithOpenAI(c:any, fileKey:string, filename:string, mimeT
 
 app.post("/api/candidates/extract",async c=>{
   try{
-    const u=c.get("user") as AuthUser;
+    const u=await currentUser(c);if(!u)return c.json({error:"unauthorized",stage:"cv_extract_auth"},401);
     const b=await c.req.json<any>();
     const m=await appMeta(c.env.DB);
     if(!m.candidate)return c.json({error:"applications_missing_candidate_key"},500);
     const r=await c.env.DB.prepare(
-      `SELECT a.id application_id,a.${m.candidate} candidate_id,cp.cv_url,cp.full_name,cp.phone,cp.linkedin_url
+      `SELECT a.id application_id,a.${m.candidate} candidate_id,cp.cv_url,cp.full_name
        FROM applications a
        JOIN jobs j ON j.id=a.job_id
        JOIN users cu ON cu.id=a.${m.candidate}
@@ -451,7 +451,7 @@ app.post("/api/candidates/extract",async c=>{
   }
 });
 
-app.post("/api/ai/screen",async c=>{try{const u=c.get("user") as AuthUser;if(!c.env.OPENAI_API_KEY)return c.json({error:"ai_not_configured",message:"Set OPENAI_API_KEY as a Worker secret."},503);const b=await c.req.json<any>(),m=await appMeta(c.env.DB);if(!m.candidate)return c.json({error:"applications_missing_candidate_key"},500);const r=await c.env.DB.prepare(`SELECT a.id,j.title,j.description,cu.name,cp.summary,cp.skills,cp.experience_years,cp.education,cp.current_position,cp.languages FROM applications a JOIN jobs j ON j.id=a.job_id JOIN users cu ON cu.id=a.${m.candidate} LEFT JOIN candidate_profiles cp ON cp.user_id=cu.id WHERE a.id=? AND j.company_id=? LIMIT 1`).bind(b.application_id,u.company_id).first<any>();if(!r)return c.json({error:"application_not_found"},404);const schema={type:"object",additionalProperties:false,properties:{overall_score:{type:"integer",minimum:0,maximum:100},summary:{type:"string"},strengths:{type:"array",items:{type:"string"}},gaps:{type:"array",items:{type:"string"}},recommendation:{type:"string"},interview_questions:{type:"array",items:{type:"string"}}},required:["overall_score","summary","strengths","gaps","recommendation","interview_questions"]};const resp=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${c.env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:c.env.OPENAI_MODEL||"gpt-5.6",store:false,instructions:"Assess job fit only from job-relevant evidence. Never infer protected traits. Return structured JSON only.",input:`JOB: ${r.title}\nDESCRIPTION: ${String(r.description).slice(0,14000)}\nCANDIDATE: ${r.name}\nEXTRACTED CV PROFILE: SUMMARY=${r.summary||""}\nEDUCATION=${r.education||""}\nCURRENT_POSITION=${r.current_position||""}\nSKILLS=${r.skills||""}\nLANGUAGES=${r.languages||""}\nEXPERIENCE_YEARS=${r.experience_years||0}`,text:{format:{type:"json_schema",name:"candidate_screening",strict:true,schema}}})});if(!resp.ok)return c.json({error:"ai_request_failed",status:resp.status},502);const d=await resp.json() as any,content=d?.output?.flatMap((x:any)=>x?.content||[]).find((x:any)=>x?.type==="output_text")?.text;if(!content)return c.json({error:"empty_ai_response"},502);let result:any;try{result=JSON.parse(content)}catch{return c.json({error:"invalid_ai_json"},502)};result.status=result.overall_score>=85?"Strong Match":result.overall_score>=70?"Potential Match":"Low Match";if(m.cs.has("ai_score"))await c.env.DB.prepare("UPDATE applications SET ai_score=?,status=?,ai_summary=?,ai_strengths=?,ai_weaknesses=?,ai_matched_skills=?,ai_missing_skills=?,ai_recommendation=?,ai_interview_questions=?,ai_model=?,ai_screened_at=CURRENT_TIMESTAMP WHERE id=?").bind(result.overall_score,result.status,result.summary,JSON.stringify(result.strengths),JSON.stringify(result.gaps),JSON.stringify(result.strengths),JSON.stringify(result.gaps),result.recommendation,JSON.stringify(result.interview_questions),c.env.OPENAI_MODEL||"gpt-5.6",b.application_id).run();else if(m.cs.has("score"))await c.env.DB.prepare("UPDATE applications SET score=?,status=? WHERE id=?").bind(result.overall_score,result.status,b.application_id).run();else if(m.cs.has("status"))await c.env.DB.prepare("UPDATE applications SET status=? WHERE id=?").bind(result.status,b.application_id).run();await audit(c,u,"screening.ai",b.application_id);return c.json(result)}catch(e:any){return c.json({error:"ai_screen_failed",detail:String(e?.message||e)},500)}});
+app.post("/api/ai/screen",async c=>{try{const u=await currentUser(c);if(!u)return c.json({error:"unauthorized",stage:"ai_screen_auth"},401);if(!u.company_id)return c.json({error:"company_context_missing"},400);if(!c.env.OPENAI_API_KEY)return c.json({error:"ai_not_configured",message:"Set OPENAI_API_KEY as a Worker secret."},503);const b=await c.req.json<any>(),m=await appMeta(c.env.DB);if(!m.candidate)return c.json({error:"applications_missing_candidate_key"},500);const r=await c.env.DB.prepare(`SELECT a.id,j.title,j.description,cu.name,cp.summary,cp.skills,cp.experience_years,cp.education,cp.current_position,cp.languages FROM applications a JOIN jobs j ON j.id=a.job_id JOIN users cu ON cu.id=a.${m.candidate} LEFT JOIN candidate_profiles cp ON cp.user_id=cu.id WHERE a.id=? AND j.company_id=? LIMIT 1`).bind(b.application_id,u.company_id).first<any>();if(!r)return c.json({error:"application_not_found"},404);const schema={type:"object",additionalProperties:false,properties:{overall_score:{type:"integer",minimum:0,maximum:100},summary:{type:"string"},strengths:{type:"array",items:{type:"string"}},gaps:{type:"array",items:{type:"string"}},recommendation:{type:"string"},interview_questions:{type:"array",items:{type:"string"}}},required:["overall_score","summary","strengths","gaps","recommendation","interview_questions"]};const resp=await fetch("https://api.openai.com/v1/responses",{method:"POST",headers:{Authorization:`Bearer ${c.env.OPENAI_API_KEY}`,"Content-Type":"application/json"},body:JSON.stringify({model:c.env.OPENAI_MODEL||"gpt-5.6",store:false,instructions:"Assess job fit only from job-relevant evidence. Never infer protected traits. Return structured JSON only.",input:`JOB: ${r.title}\nDESCRIPTION: ${String(r.description).slice(0,14000)}\nCANDIDATE: ${r.name}\nEXTRACTED CV PROFILE: SUMMARY=${r.summary||""}\nEDUCATION=${r.education||""}\nCURRENT_POSITION=${r.current_position||""}\nSKILLS=${r.skills||""}\nLANGUAGES=${r.languages||""}\nEXPERIENCE_YEARS=${r.experience_years||0}`,text:{format:{type:"json_schema",name:"candidate_screening",strict:true,schema}}})});if(!resp.ok)return c.json({error:"ai_request_failed",status:resp.status},502);const d=await resp.json() as any,content=d?.output?.flatMap((x:any)=>x?.content||[]).find((x:any)=>x?.type==="output_text")?.text;if(!content)return c.json({error:"empty_ai_response"},502);let result:any;try{result=JSON.parse(content)}catch{return c.json({error:"invalid_ai_json"},502)};result.status=result.overall_score>=85?"Strong Match":result.overall_score>=70?"Potential Match":"Low Match";if(m.cs.has("ai_score"))await c.env.DB.prepare("UPDATE applications SET ai_score=?,status=?,ai_summary=?,ai_strengths=?,ai_weaknesses=?,ai_matched_skills=?,ai_missing_skills=?,ai_recommendation=?,ai_interview_questions=?,ai_model=?,ai_screened_at=CURRENT_TIMESTAMP WHERE id=?").bind(result.overall_score,result.status,result.summary,JSON.stringify(result.strengths),JSON.stringify(result.gaps),JSON.stringify(result.strengths),JSON.stringify(result.gaps),result.recommendation,JSON.stringify(result.interview_questions),c.env.OPENAI_MODEL||"gpt-5.6",b.application_id).run();else if(m.cs.has("score"))await c.env.DB.prepare("UPDATE applications SET score=?,status=? WHERE id=?").bind(result.overall_score,result.status,b.application_id).run();else if(m.cs.has("status"))await c.env.DB.prepare("UPDATE applications SET status=? WHERE id=?").bind(result.status,b.application_id).run();await audit(c,u,"screening.ai",b.application_id);return c.json(result)}catch(e:any){return c.json({error:"ai_screen_failed",detail:String(e?.message||e)},500)}});
 app.get("/", (c) => c.html(`<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${c.env.APP_NAME}</title>
 <style>
@@ -480,15 +480,33 @@ async function loadApps(){
     const rows=await api('/api/applications');
     $('#appsBody').innerHTML=rows.map(x=>{
       const score=x.screening_score==null?'-':x.screening_score;
-      return '<tr><td>'+esc(x.candidate_name||'CV Candidate')+'</td><td>'+esc(x.job_title||'-')+'</td><td><strong>'+score+'</strong></td><td><span class="pill">'+esc(x.status||'Review')+'</span></td><td><button class="btn secondary" onclick="extractCv(\\''+x.id+'\\')">Extract CV</button> <button class="btn secondary" onclick="rule(\\''+x.id+'\\')">Rule</button> <button class="btn" onclick="ai(\\''+x.id+'\\')">AI Screen</button></td></tr>';
+      return '<tr><td>'+esc(x.candidate_name||'CV Candidate')+'</td><td>'+esc(x.job_title||'-')+'</td><td><strong>'+score+'</strong></td><td><span class="pill">'+esc(x.status||'Review')+'</span></td><td><button type="button" class="btn secondary" onclick="extractCv(\\''+x.id+'\\')">Extract CV</button> <button type="button" class="btn secondary" onclick="rule(\\''+x.id+'\\')">Rule</button> <button type="button" class="btn" onclick="ai(\\''+x.id+'\\')">AI Screen</button></td></tr>';
     }).join('');
   }catch(e){
     $('#appsBody').innerHTML='<tr><td colspan="5">Screening load failed: '+esc(e.message)+'</td></tr>';
   }
 }
 async function extractCv(id){
-  $('#screenResult').textContent='Extracting CV...';
-  try{const r=await api('/api/candidates/extract',{method:'POST',body:JSON.stringify({application_id:id})});$('#screenResult').textContent=JSON.stringify(r.extraction,null,2);await refresh();await loadApps()}catch(e){$('#screenResult').textContent=e.message}
+  if(window.extractingCv)return;
+  window.extractingCv=true;
+  const box=$('#result');
+  const out=$('#resultText');
+  box.classList.remove('hidden');
+  out.textContent='Extracting CV from R2...';
+  try{
+    const r=await api('/api/candidates/extract',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({application_id:id})
+    });
+    out.textContent=JSON.stringify(r.extraction||r,null,2);
+    await refresh();
+    await loadApps();
+  }catch(e){
+    out.textContent='CV extraction failed: '+e.message;
+  }finally{
+    window.extractingCv=false;
+  }
 }
 async function refresh(){const d=await api('/api/dashboard');$('#mJobs').textContent=d.jobs;$('#mCandidates').textContent=d.candidates;$('#mApplications').textContent=d.applications;$('#mStrong').textContent=d.strong_matches;await loadJobs()}
 $('#jobForm').onsubmit=async e=>{
