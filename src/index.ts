@@ -40,7 +40,7 @@ async function createSession(c:any,u:AuthUser){
   const expires=new Date(Date.now()+7*86400000).toISOString();
   await c.env.DB.prepare("INSERT INTO sessions(token,user_id,expires_at) VALUES(?,?,?)")
     .bind(await sha256(token),u.id,expires).run();
-  c.header("Set-Cookie",setCookie(token,7*86400));c.header("Set-Cookie",clearLegacyCookie());
+  c.header("Set-Cookie",setCookie(token,7*86400));
 }
 async function currentUser(c:any):Promise<AuthUser|null>{
   const raw=cookieToken(c.req.raw);
@@ -121,14 +121,13 @@ app.post("/api/auth/logout",async c=>{
     if(raw)await c.env.DB.prepare("DELETE FROM sessions WHERE token=?").bind(await sha256(raw)).run();
   }catch{}
   c.header("Set-Cookie",setCookie("",0));
-  c.header("Set-Cookie",clearLegacyCookie());
   return c.json({ok:true});
 });
 app.get("/api/auth/me",requireAuth,c=>c.json({user:c.get("user")}));
 app.get("/api/auth/status",async c=>{
   try{
     const u=await currentUser(c);
-    return c.json({authenticated:!!u,user:u?{id:u.id,role:u.role,company_id:u.company_id,email:u.email}:null});
+    return c.json({authenticated:!!u,cookie_present:!!cookieToken(c.req.raw),user:u?{id:u.id,role:u.role,company_id:u.company_id,email:u.email}:null});
   }catch(e:any){
     return c.json({authenticated:false,error:"auth_status_failed",detail:String(e?.message||e)},500);
   }
