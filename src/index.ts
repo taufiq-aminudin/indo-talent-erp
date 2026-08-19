@@ -1,6 +1,8 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
+import { extractText, getDocumentProxy } from "unpdf";
+import { unzipSync, strFromU8 } from "fflate";
 
 interface Env {
   DB: D1Database;
@@ -256,17 +258,18 @@ app.get("/api/candidates",async c=>{
   try{
     const u=await currentUser(c);
     if(!u)return c.json({error:"unauthorized"},401);
-    const rows=await c.env.DB.prepare(
-      "SELECT cu.id,cu.name candidate_name,cp.cv_url,cp.full_name,cp.headline,cp.summary,"+
-      "a.id application_id,a.job_id,j.title job_title,a.status,a.score "+
-      "FROM users cu "+
-      "LEFT JOIN candidate_profiles cp ON cp.user_id=cu.id "+
-      "LEFT JOIN applications a ON a.candidate_id=cu.id "+
-      "LEFT JOIN jobs j ON j.id=a.job_id "+
-      "WHERE cu.company_id=? AND cu.role='candidate' "+
-      "ORDER BY cu.created_at DESC"
-    ).bind(u.company_id).all();
-    return c.json(rows.results||[]);
+    const m=await appMeta(c.env.DB);
+    if(!m.candidate)return c.json({error:"applications_missing_candidate_key"},500);
+    const score=m.cs.has("ai_score")?"a.ai_score":m.cs.has("score")?"a.score":"NULL";
+    const sql=`SELECT cu.id,cu.name candidate_name,cp.cv_url,cp.full_name,cp.headline,cp.summary,
+      a.id application_id,a.job_id,j.title job_title,a.status,${score} score
+      FROM users cu
+      LEFT JOIN candidate_profiles cp ON cp.user_id=cu.id
+      LEFT JOIN applications a ON a.${m.candidate}=cu.id
+      LEFT JOIN jobs j ON j.id=a.job_id
+      WHERE cu.company_id=? AND cu.role='candidate' AND (j.status IS NULL OR j.status!='deleted')
+      ORDER BY cu.created_at DESC`;
+    return c.json((await c.env.DB.prepare(sql).bind(u.company_id).all()).results||[]);
   }catch(e:any){
     return c.json({error:"candidates_query_failed",detail:String(e?.message||e)},500);
   }
@@ -398,7 +401,7 @@ app.post("/api/screenings/rule",async c=>{
     // such as "posisi", "departemen", "lokasi", "atasan", "langsung", etc. into skills.
     const skillMap:any[]=[
       ["accounting",["accounting","akuntansi","financial accounting"]],
-      ["financial management",["financial management","manajemen keuangan","finance management"]],
+      ["financial management",["financial management","manajemen keuangan","finance management","finance manager","financial manager","finance department","finance"]],
       ["financial reporting",["financial reporting","financial report","laporan keuangan","laporan finansial"]],
       ["financial analysis",["financial analysis","analisis keuangan"]],
       ["budgeting",["budgeting","budget preparation","penyusunan anggaran","anggaran"]],
@@ -480,6 +483,55 @@ app.post("/api/screenings/rule",async c=>{
   }catch(e:any){return c.json({error:"rule_screen_failed",detail:String(e?.message||e)},500)}
 });
 
+function cleanCvText(text:string){
+  return String(text||"").replace(/\u0000/g," ").replace(/\r/g,"\n").replace(/[ \t]+/g," ").replace(/\n{3,}/g,"\n\n").trim().slice(0,120000);
+}
+function decodeXmlText(xml:string){
+  return xml.replace(/<w:tab[^>]*\/>/g," ").replace(/<w:br[^>]*\/>/g,"\n").replace(/<[^>]+>/g," ").replace(/&amp;/g,"&").replace(/&lt;/g,"<").replace(/&gt;/g,">").replace(/&quot;/g,'"').replace(/&apos;/g,"'").replace(/\s+/g," ").trim();
+}
+async function extractLocalCvText(obj:R2Object,filename:string){
+  const bytes=new Uint8Array(await obj.arrayBuffer());
+  const lower=filename.toLowerCase();
+  if(lower.endsWith(".txt")) return cleanCvText(new TextDecoder().decode(bytes));
+  if(lower.endsWith(".docx")){
+    const zip=unzipSync(bytes,{filter:(f:any)=>/word\/(document|header[0-9]*|footer[0-9]*)\.xml$/i.test(f.name)});
+    const parts=Object.entries(zip).map(([name,data]:any)=>({name,data})).sort((a,b)=>a.name.localeCompare(b.name));
+    return cleanCvText(parts.map(x=>decodeXmlText(strFromU8(x.data))).join("\n"));
+  }
+  if(lower.endsWith(".pdf")){
+    const pdf=await getDocumentProxy(bytes);
+    if(pdf.numPages>40)throw new Error("cv_pdf_too_many_pages_max_40");
+    const out=await extractText(pdf,{mergePages:true});
+    return cleanCvText(String(out.text||""));
+  }
+  return "";
+}
+function localCvProfile(text:string){
+  const t=cleanCvText(text);
+  const lines=t.split(/\n+/).map(x=>x.trim()).filter(Boolean);
+  const lower=t.toLowerCase();
+  const years=[...lower.matchAll(/(?:over|lebih dari|approximately|sekitar|experience|pengalaman)[^\n]{0,40}?(\d{1,2})\s*\+?\s*(?:years?|tahun)/gi)].map(m=>Number(m[1])).filter(n=>n>=0&&n<=60);
+  const experience_years=years.length?Math.max(...years):0;
+  const skillMap:any[]=[
+    ["accounting",["accounting","akuntansi"]],["financial management",["financial management","finance management","manajemen keuangan","finance manager","financial manager"]],["financial reporting",["financial reporting","financial report","laporan keuangan"]],["financial analysis",["financial analysis","analisis keuangan"]],["budgeting",["budgeting","budget preparation","penyusunan anggaran","anggaran"]],["forecasting",["forecasting","financial forecasting"]],["tax",["tax","taxation","pajak","perpajakan"]],["audit",["audit","auditing","internal audit"]],["compliance",["compliance","regulatory compliance","kepatuhan"]],["treasury",["treasury","cash management","manajemen kas"]],["cash flow",["cash flow","arus kas"]],["accounts payable",["accounts payable","account payable","utang usaha"]],["accounts receivable",["accounts receivable","account receivable","piutang usaha"]],["cost control",["cost control","cost management"]],["payroll",["payroll","penggajian"]],["erp",["erp","sap","oracle erp","netsuite"]],["microsoft excel",["microsoft excel","ms excel","excel"]],["data analysis",["data analysis","data analytics","analisis data"]],["leadership",["leadership","kepemimpinan"]],["team management",["team management","people management","manajemen tim"]],["project management",["project management","manajemen proyek"]],["communication",["communication","komunikasi"]],["analytical thinking",["analytical thinking","analytical skills","berpikir analitis"]],["attention to detail",["attention to detail","detail oriented","detail-oriented","ketelitian"]],["decision making",["decision making","decision-making","pengambilan keputusan"]],["integrity",["integrity","integritas"]],["time management",["time management","manajemen waktu"]],["problem solving",["problem solving","pemecahan masalah"]],["risk management",["risk management","manajemen risiko"]],["procurement",["procurement","purchasing","pengadaan"]],["inventory management",["inventory management","stock management"]],["human resources",["human resources","human resource","sumber daya manusia"]],["recruitment",["recruitment","rekrutmen"]]
+  ];
+  const has=(aliases:any[])=>aliases.some(a=>lower.includes(String(a).toLowerCase()));
+  const skills=skillMap.filter(([,a])=>has(a)).map(([n])=>n);
+  const posLine=lines.find(x=>/(manager|director|supervisor|officer|accountant|finance|accounting|analyst|lead|head|staff)/i.test(x)&&x.length<100) || "";
+  const eduLine=lines.find(x=>/(bachelor|master|sarjana|magister|diploma|universitas|university|college|degree|s1|s2|s3)/i.test(x)&&x.length<180)||"";
+  const summary=lines.slice(0,25).join("\n").slice(0,5000);
+  const languages=[...new Set((lower.match(/(?:english|bahasa indonesia|indonesian|mandarin|chinese|japanese|korean)/g)||[]).map(x=>x.replace(/^./,c=>c.toUpperCase())))];
+  return {education:eduLine,experience_years,current_position:posLine,skills,languages,headline:posLine,summary,work_history:[],achievements:[]};
+}
+async function extractCvLocal(c:any,fileKey:string,filename:string){
+  const obj=await c.env.CV_BUCKET.get(fileKey);
+  if(!obj)throw new Error("cv_file_not_found");
+  const text=await extractLocalCvText(obj,filename);
+  if(!text)throw new Error("cv_text_not_extractable");
+  const profile=localCvProfile(text);
+  return {data:profile,text,source:"local"};
+}
+
 async function extractCvWithOpenAI(c:any, fileKey:string, filename:string, mimeType:string){
   if(!c.env.OPENAI_API_KEY)throw new Error("ai_not_configured");
   const obj=await c.env.CV_BUCKET.get(fileKey);
@@ -546,7 +598,16 @@ app.post("/api/candidates/extract",async c=>{
     const filename=String(r.cv_url).split("/").pop()||"cv";
     const lower=filename.toLowerCase();
     const mime=lower.endsWith(".pdf")?"application/pdf":lower.endsWith(".docx")?"application/vnd.openxmlformats-officedocument.wordprocessingml.document":"text/plain";
-    const data=await extractCvWithOpenAI(c,r.cv_url,filename,mime);
+    let data:any; let extractionSource="local";
+    try{
+      const local=await extractCvLocal(c,r.cv_url,filename);
+      data=local.data;
+      // Local extraction is sufficient for Rule Screening and does not consume AI credits.
+    }catch(localErr:any){
+      if(!c.env.OPENAI_API_KEY) throw new Error(String(localErr?.message||localErr));
+      data=await extractCvWithOpenAI(c,r.cv_url,filename,mime);
+      extractionSource="openai";
+    }
     const summary=String(data.summary||"").slice(0,10000);
     const skills=JSON.stringify(data.skills||[]);
     const languages=JSON.stringify(data.languages||[]);
@@ -566,11 +627,11 @@ app.post("/api/candidates/extract",async c=>{
       vals.push(r.candidate_id);
       await c.env.DB.prepare(`UPDATE candidate_profiles SET ${sets.join(",")} WHERE user_id=?`).bind(...vals).run();
     }
-    return c.json({ok:true,application_id:r.application_id,filename,extraction:data});
+    return c.json({ok:true,application_id:r.application_id,filename,source:extractionSource,extraction:data});
   }catch(e:any){
     const msg=String(e?.message||e);
-    const status=msg==="ai_not_configured"?503:msg==="cv_file_not_found"?404:500;
-    return c.json({error:msg==="ai_not_configured"?"ai_not_configured":"cv_extraction_failed",detail:msg},status);
+    const status=msg==="cv_file_not_found"?404:(msg==="cv_text_not_extractable"||msg==="cv_pdf_too_many_pages_max_40")?422:(msg.startsWith("openai_extraction_failed_429")?429:500);
+    return c.json({error:msg==="ai_not_configured"?"ai_not_configured":(msg==="cv_text_not_extractable"?"cv_text_not_extractable":"cv_extraction_failed"),detail:msg},status);
   }
 });
 
@@ -657,7 +718,7 @@ app.get("/", (c) => c.html(`<!doctype html>
 <div id="app" class="hidden"><header><div class="brand"><img src="/logo.png" onerror="this.style.display='none'"><span>${c.env.APP_NAME}</span></div><div><span id="who" class="muted"></span> <button class="btn secondary" id="logout">Logout</button></div></header><main><div class="tabs"><button data-tab="overview">Overview</button><button class="secondary" data-tab="jobs">Jobs</button><button class="secondary" data-tab="candidates">Candidates</button><button class="secondary" data-tab="applications">Screening</button></div>
 <section id="overview" class="tab"><div class="grid"><div class="card metric">Jobs<b id="mJobs">0</b></div><div class="card metric">Candidates<b id="mCandidates">0</b></div><div class="card metric">Applications<b id="mApplications">0</b></div><div class="card metric">Strong matches<b id="mStrong">0</b></div></div><div class="card"><div class="section-head"><div><h2>AI Screening</h2><p class="muted">Create jobs, manage positions, upload CVs, attach candidates to jobs, then run rule-based or AI screening.</p></div><button class="btn" type="button" id="manageJobsBtn">Manage jobs</button></div></div></section>
 <section id="jobs" class="tab hidden"><div class="card"><div class="section-head"><div><h2 id="jobFormTitle">Create job</h2><p class="muted">Create a position, then manage it from the Jobs dashboard.</p></div><button class="btn secondary hidden" type="button" id="cancelJobEdit">Cancel edit</button></div><form id="jobForm"><input type="hidden" id="editingJobId"><div class="row"><input class="input" id="jobTitle" placeholder="Job title" required><input class="input" id="jobLocation" placeholder="Location"></div><input class="input" id="jobSalary" placeholder="Salary / range (optional)"><textarea class="input" id="jobDescription" rows="6" placeholder="Job description" required></textarea><input class="input" id="jobSkills" placeholder="Required skills, comma separated"><div class="form-actions"><button class="btn" id="jobSubmitBtn" type="submit">Create job</button><button class="btn secondary hidden" id="jobResetBtn" type="button">Clear form</button></div><p id="jobMsg" class="muted"></p></form></div><div class="card"><div class="section-head"><div><h2>Jobs</h2><p class="muted">Edit or remove positions without losing existing screening history.</p></div><button class="btn secondary" type="button" id="refreshJobs">Refresh</button></div><div class="table-wrap"><table class="table"><thead><tr><th>Title</th><th>Location</th><th>Status</th><th>Created</th><th>Actions</th></tr></thead><tbody id="jobsBody"></tbody></table></div></div></section>
-<section id="candidates" class="tab hidden"><div class="card"><h2>Upload CV</h2><p class="muted">Pilih satu atau banyak CV, atau satu folder. CV diproses satu per satu agar upload banyak file tidak macet. Nama, email, dan nomor HP tidak diperlukan.</p><form id="candidateForm"><div class="row"><select class="input" id="candidateJob" required><option value="">Select job position</option></select><div class="upload-options"><label class="upload-option"><span>📄 Upload file(s)</span><input class="input" id="candidateFiles" type="file" accept=".pdf,.docx,.txt" multiple></label><label class="upload-option"><span>📁 Upload folder</span><input class="input" id="candidateFolder" type="file" accept=".pdf,.docx,.txt" multiple webkitdirectory directory></label></div></div><button class="btn">Upload CVs</button><p id="candidateMsg" class="muted"></p></form></div><div class="card"><h2>Candidate Screening Pool</h2><table class="table"><thead><tr><th>CV</th><th>Job</th><th>Score</th><th>Status</th></tr></thead><tbody id="candidatesBody"></tbody></table></div></section>
+<section id="candidates" class="tab hidden"><div class="card"><h2>Upload CV</h2><p class="muted">Pilih satu atau banyak CV, atau satu folder. CV diproses satu per satu agar upload banyak file tidak macet. Nama, email, dan nomor HP tidak diperlukan.</p><form id="candidateForm"><div class="row"><select class="input" id="candidateJob" required><option value="">Select job position</option></select><div class="upload-options"><label class="upload-option"><span>📄 Upload file(s)</span><input class="input" id="candidateFiles" type="file" accept=".pdf,.docx,.txt" multiple></label><label class="upload-option"><span>📁 Upload folder</span><input class="input" id="candidateFolder" type="file" accept=".pdf,.docx,.txt" multiple webkitdirectory directory></label></div></div><button class="btn">Upload CVs</button><p id="candidateMsg" class="muted"></p></form></div><div class="card"><h2>Candidate Screening Pool</h2><div class="table-wrap"><table class="table"><thead><tr><th>CV</th><th>Job</th><th>Score</th><th>Status</th><th>Actions</th></tr></thead><tbody id="candidatesBody"></tbody></table></div></div></section>
 <section id="applications" class="tab hidden"><div class="card"><h2>Screening pipeline</h2><table class="table"><thead><tr><th>Candidate</th><th>Job</th><th>Score</th><th>Status</th><th>Actions</th></tr></thead><tbody id="appsBody"></tbody></table></div><div id="result" class="card hidden">
 <style>
 .ai-result-card{border:1px solid #dbe4f0;border-radius:18px;background:#fff;overflow:hidden;box-shadow:0 8px 24px rgba(15,23,42,.06)}
@@ -722,7 +783,7 @@ function renderProfessionalScreeningResult(raw){
 <h2>Screening result</h2><div id="resultText"></div></div></section>
 </main></div>
 <style>
-.section-head{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:14px}.section-head h2{margin-bottom:4px}.form-actions{display:flex;gap:8px;align-items:center;margin-top:12px}.table-wrap{overflow:auto}.job-actions{display:flex;gap:8px;flex-wrap:wrap}.job-action{white-space:nowrap;min-width:72px}.job-status{display:inline-flex;padding:5px 9px;border-radius:999px;background:#ecfdf3;color:#047857;font-size:12px;font-weight:750;text-transform:capitalize}.job-status.closed{background:#f1f5f9;color:#64748b}.job-empty{text-align:center;color:#64748b;padding:34px}.job-empty strong{color:#17365d;font-size:14px}.job-empty span{display:inline-block;margin-top:4px;font-size:12px}.job-danger{color:#b91c1c!important;border-color:#fecaca!important;background:#fff7f7!important}.job-danger:hover{background:#fee2e2!important}.job-title-cell{display:flex;flex-direction:column;gap:4px}.job-title-cell strong{color:#102a43;font-size:14px}.job-title-cell span{font-size:11px;color:#94a3b8}.screen-loading{display:flex;align-items:center;gap:12px;padding:18px;border:1px solid #dbe5f0;background:#f8fafc;border-radius:12px;color:#334155}.screen-loading strong{display:block}.screen-loading small{display:block;color:#64748b;margin-top:3px}.loader-dot{width:12px;height:12px;border-radius:50%;border:2px solid #bfdbfe;border-top-color:#1769e0;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}@media(max-width:700px){.section-head{align-items:flex-start;flex-direction:column}.job-actions{flex-direction:row;align-items:stretch}.job-action{width:auto}}</style>
+.section-head{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:14px}.section-head h2{margin-bottom:4px}.form-actions{display:flex;gap:8px;align-items:center;margin-top:12px}.table-wrap{overflow:auto}.job-actions{display:flex;gap:8px;flex-wrap:wrap}.job-action{white-space:nowrap;min-width:72px}.job-status{display:inline-flex;padding:5px 9px;border-radius:999px;background:#ecfdf3;color:#047857;font-size:12px;font-weight:750;text-transform:capitalize}.job-status.closed{background:#f1f5f9;color:#64748b}.job-empty{text-align:center;color:#64748b;padding:34px}.job-empty strong{color:#17365d;font-size:14px}.job-empty span{display:inline-block;margin-top:4px;font-size:12px}.job-danger{color:#b91c1c!important;border-color:#fecaca!important;background:#fff7f7!important}.job-danger:hover{background:#fee2e2!important}.job-title-cell{display:flex;flex-direction:column;gap:4px}.job-title-cell strong{color:#102a43;font-size:14px}.job-title-cell span{font-size:11px;color:#94a3b8;margin-top:3px}.screen-loading{display:flex;align-items:center;gap:12px;padding:18px;border:1px solid #dbe5f0;background:#f8fafc;border-radius:12px;color:#334155}.screen-loading strong{display:block}.screen-loading small{display:block;color:#64748b;margin-top:3px}.loader-dot{width:12px;height:12px;border-radius:50%;border:2px solid #bfdbfe;border-top-color:#1769e0;animation:spin .8s linear infinite}@keyframes spin{to{transform:rotate(360deg)}}@media(max-width:700px){.section-head{align-items:flex-start;flex-direction:column}.job-actions{flex-direction:row;align-items:stretch}.job-action{width:auto}}</style>
 <script src="/app.js?v=633" defer></script></body></html>`));
 
 app.notFound((c) => c.json({ error: "not_found" }, 404));
