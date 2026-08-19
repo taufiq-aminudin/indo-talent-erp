@@ -8,5 +8,14 @@
     "Cloudflare D1",
     "Cloudflare R2"
   ],
-  "status": "foundation"
+  "status": "v6.1-auth-tenant-upload",
+  "modules": [
+    "authentication",
+    "session cookies",
+    "tenant-isolated D1 queries",
+    "R2 CV upload",
+    "rule-based screening",
+    "OpenAI Responses API screening",
+    "recruiter dashboard"
+  ]
 }

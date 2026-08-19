@@ -15,3 +15,6 @@ bucket_name = "ai-screening-cv"
 
 [observability]
 enabled = true
+
+[assets]
+directory = "./public"
