@@ -55,7 +55,22 @@ async function deleteJob(id){
 }
 window.deleteJob=deleteJob;
 $('#refreshJobs').onclick=()=>loadJobs();$('#cancelJobEdit').onclick=resetJobForm;$('#jobResetBtn').onclick=resetJobForm;$('#manageJobsBtn').onclick=()=>document.querySelector('.tabs button[data-tab="jobs"]').click();
-async function loadCandidates(){const rows=await api('/api/candidates');$('#candidatesBody').innerHTML=rows.map(x=>'<tr><td>'+esc(x.cv_url||x.full_name||'-')+'</td><td>'+esc(x.job_title||'-')+'</td><td>'+(x.score==null?'-':x.score)+'</td><td><span class="pill">'+esc(x.status||'Uploaded')+'</span></td></tr>').join('')}
+async function loadCandidates(){
+  try{
+    const rows=await api('/api/candidates');
+    const body=$('#candidatesBody');
+    if(!rows.length){body.innerHTML='<tr><td colspan="5" class="pool-empty"><strong>No CVs in screening pool</strong><br><span>Upload one or more CVs and attach them to a job to begin screening.</span></td></tr>';return}
+    body.innerHTML=rows.map(x=>{
+      const file=String(x.cv_url||x.full_name||'CV Candidate').split('/').pop()||'CV Candidate';
+      const score=x.score==null?'—':x.score;
+      const status=String(x.status||'Uploaded');
+      const app=x.application_id;
+      const jsId=app?JSON.stringify(String(app)).replace(/</g,'\u003c') : '';
+      const actions=app?'<button type="button" class="btn secondary" onclick="extractCv('+jsId+')">Extract</button> <button type="button" class="btn secondary" onclick="rule('+jsId+')">Rule</button> <button type="button" class="btn" onclick="ai('+jsId+')">AI</button>':'<span class="pool-muted">No application</span>';
+      return '<tr><td><div class="pool-cv"><strong>'+esc(file)+'</strong><span>'+esc(x.full_name||'Candidate CV')+'</span></div></td><td>'+esc(x.job_title||'—')+'</td><td><strong>'+esc(score)+'</strong></td><td><span class="pill">'+esc(status)+'</span></td><td><div class="pool-actions">'+actions+'</div></td></tr>';
+    }).join('');
+  }catch(e){$('#candidatesBody').innerHTML='<tr><td colspan="5" class="pool-error">Candidate pool could not be loaded: '+esc(e.message)+'</td></tr>'}
+}
 async function loadApps(){
   try{
     const rows=await api('/api/applications');
@@ -106,6 +121,12 @@ function resultList(v){
     .screen-error-body{padding:20px 24px}.screen-error-message{font-size:14px;line-height:1.6;color:#7f1d1d}
     .screen-error-code{display:inline-block;margin-top:12px;padding:5px 9px;border-radius:7px;background:#fef2f2;color:#991b1b;font:600 12px ui-monospace,SFMono-Regular,Menlo,monospace}
     .screen-error-action{margin-top:14px;padding:12px 14px;border-radius:10px;background:#f8fafc;border:1px solid #e2e8f0;color:#475569;font-size:12px}
+    .screen-extraction{border:1px solid #cfe0f5;border-radius:16px;background:#fff;overflow:hidden;box-shadow:0 6px 20px rgba(15,23,42,.05)}
+    .screen-extraction-head{padding:20px 24px;background:#f7fbff;border-bottom:1px solid #e2edf8;display:flex;justify-content:space-between;gap:16px;align-items:center}
+    .screen-extraction-title{font-size:19px;font-weight:750;color:#12365a}.screen-extraction-sub{font-size:12px;color:#64748b;margin-top:5px}.extract-ready{padding:7px 11px;border-radius:999px;background:#dcfce7;color:#166534;font-size:12px;font-weight:750}
+    .screen-extraction-body{padding:20px 24px}.extract-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.extract-metric{padding:14px;border:1px solid #e2e8f0;border-radius:12px;background:#f8fafc}.extract-metric span{display:block;font-size:11px;color:#64748b;margin-bottom:5px}.extract-metric strong{font-size:14px;color:#17365d}.extract-source{margin-top:16px;padding:12px 14px;border-radius:10px;background:#eff6ff;border:1px solid #dbeafe;color:#1e40af;font-size:12px;line-height:1.5}
+    .pool-cv{display:flex;flex-direction:column;gap:3px}.pool-cv strong{color:#17365d;font-size:13px}.pool-cv span{color:#94a3b8;font-size:11px}.pool-actions{display:flex;gap:6px;flex-wrap:wrap}.pool-muted{color:#94a3b8;font-size:12px}.pool-empty,.pool-error{text-align:center;padding:34px!important;color:#64748b}.pool-empty strong{color:#17365d}.pool-empty span{font-size:12px}.pool-error{color:#991b1b;background:#fff7f7}
+    @media(max-width:700px){.screen-result-top{align-items:flex-start}.screen-grid,.screen-meta,.extract-grid{grid-template-columns:1fr}}
     @media(max-width:700px){.screen-result-top{align-items:flex-start}.screen-grid,.screen-meta{grid-template-columns:1fr}}
   `;
   document.head.appendChild(s);
@@ -121,7 +142,8 @@ function renderScreeningResult(data){
     else if(String(data.error)==='ai_quota_exhausted'){title='AI credits unavailable';message='The OpenAI API rejected the request because the configured account has no remaining credits.';action='Add API credits or configure another AI provider. Rule Screening can still be used after CV extraction.'}
     else if(String(data.error)==='ai_not_configured'){title='AI service is not configured';message='No AI provider is currently configured for this workspace.';action='Add a valid AI API configuration before running screening.'}
     else if(String(data.error)==='ai_request_failed'){title='AI screening temporarily unavailable';message='The AI provider rejected or could not complete this request.';action='Check API credits/quota and configuration, then retry. No candidate score was changed.'}
-    else if(String(data.error)==='cv_extraction_failed'){title='CV extraction failed';message='The CV could not be processed by the extraction service.';action='Retry extraction after the AI service is available.'}
+    else if(String(data.error)==='cv_text_not_extractable'){title='CV text could not be extracted';message='This CV appears to be image-based or uses a format that has no readable text layer.';action='For scanned/image CVs, configure AI extraction. Text-based PDF and DOCX files can be extracted locally without AI credits.'}
+    else if(String(data.error)==='cv_extraction_failed'){title='CV extraction failed';message='The CV could not be processed.';action='Retry extraction. If this is a scanned PDF, AI extraction is required.'}
     out.innerHTML='<div class="screen-error-card"><div class="screen-error-head"><div><div class="screen-error-title">'+resultEsc(title)+'</div><div class="screen-error-sub">AI Screening</div></div><div class="screen-error-icon">!</div></div><div class="screen-error-body"><div class="screen-error-message">'+resultEsc(message)+'</div><div class="screen-error-action">'+resultEsc(action)+'</div><div class="screen-error-code">'+resultEsc(data.error)+'</div></div></div>';
     return;
   }
@@ -155,6 +177,18 @@ function renderScreeningResult(data){
     '</div>';
 }
 
+function renderExtractionResult(payload){
+  const box=$('#result'),out=$('#resultText');box.classList.remove('hidden');
+  const d=payload?.extraction||payload||{};
+  const skills=resultList(d.skills),langs=resultList(d.languages),history=resultList(d.work_history),achievements=resultList(d.achievements);
+  const source=String(payload?.source||'local');
+  const sourceLabel=source==='openai'?'AI-assisted extraction':'Local CV extraction';
+  const sourceNote=source==='openai'?'OpenAI was used because local text extraction was not sufficient.':'Text was extracted directly from the uploaded CV. This does not consume OpenAI credits.';
+  const summary=String(d.summary||'').trim();
+  const position=String(d.current_position||'').trim(),education=String(d.education||'').trim();
+  out.innerHTML='<div class="screen-extraction"><div class="screen-extraction-head"><div><div class="screen-eyebrow">CV EXTRACTION</div><div class="screen-extraction-title">CV is ready for screening</div><div class="screen-extraction-sub">The extracted profile can now be compared against the selected job.</div></div><span class="extract-ready">Ready</span></div><div class="screen-extraction-body"><div class="extract-grid"><div class="extract-metric"><span>Current Position</span><strong>'+resultEsc(position||'Not identified')+'</strong></div><div class="extract-metric"><span>Experience</span><strong>'+resultEsc(d.experience_years||0)+' years</strong></div><div class="extract-metric"><span>Education</span><strong>'+resultEsc(education||'Not identified')+'</strong></div></div><div class="screen-section"><div class="screen-section-title">Recognised Skills</div><div class="skill-wrap">'+(skills.length?skills.map(x=>'<span class="skill-chip skill-match">'+resultEsc(x)+'</span>').join(''):'<span class="screen-empty">No recognised skills yet.</span>')+'</div></div>'+(summary?'<div class="screen-section"><div class="screen-section-title">CV Summary</div><div class="screen-summary">'+resultEsc(summary)+'</div></div>':'')+'<div class="extract-source"><strong>'+resultEsc(sourceLabel)+'</strong><br>'+resultEsc(sourceNote)+' Rule Screening is now available.</div></div></div>';
+}
+
 async function extractCv(id){
   if(window.extractingCv)return;
   window.extractingCv=true;
@@ -168,11 +202,12 @@ async function extractCv(id){
       headers:{'Content-Type':'application/json'},
       body:JSON.stringify({application_id:id})
     });
-    renderScreeningResult(r.extraction||r);
+    renderExtractionResult(r);
     await refresh();
     await loadApps();
+    await loadCandidates();
   }catch(e){
-    out.textContent='CV extraction failed: '+e.message;
+    renderScreeningResult({error:String(e.message||e).includes('cv_text_not_extractable')?'cv_text_not_extractable':'cv_extraction_failed',detail:e.message});
   }finally{
     window.extractingCv=false;
   }
