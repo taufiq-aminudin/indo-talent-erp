@@ -60,7 +60,7 @@ app.get("/", (c) => c.html(`<!doctype html>
 <script>
 const $=s=>document.querySelector(s); const $$=s=>[...document.querySelectorAll(s)];
 let registerMode=false;
-async function api(path,opt={}){const r=await fetch(path,{credentials:'same-origin',...opt});const data=await r.json().catch(()=>({}));if(!r.ok)throw new Error(data.detail?`${data.error||'request_failed'}: ${data.detail}`:(data.error||'request_failed'));return data}
+async function api(path,opt={}){const r=await fetch(path,{credentials:'same-origin',...opt});const data=await r.json().catch(()=>({}));if(!r.ok){const base=data.error||'request_failed';const message=data.detail?base+': '+data.detail:base;throw new Error(message)}return data}
 function setMode(){registerMode=!registerMode;$('#authTitle').textContent=registerMode?'Create organization':'Sign in';$('#authBtn').textContent=registerMode?'Create account':'Sign in';$('#orgField').classList.toggle('hidden',!registerMode);$('#name').required=registerMode;$('#toggleAuth').textContent=registerMode?'Back to sign in':'Create an organization'}
 $('#toggleAuth').onclick=e=>{e.preventDefault();setMode()};
 $('#authForm').onsubmit=async e=>{e.preventDefault();$('#authMsg').textContent='Working...';try{const path=registerMode?'/api/auth/register':'/api/auth/login';const body=registerMode?{organization_name:$('#org').value,name:$('#name').value,email:$('#email').value,password:$('#password').value}:{email:$('#email').value,password:$('#password').value};await api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});await boot()}catch(err){$('#authMsg').textContent=err.message}}
