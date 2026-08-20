@@ -797,65 +797,69 @@ app.get("/api/admin/config-status",async c=>{
     auth_mode:cfg.hash?"password_hash":cfg.password?"password_secret":"missing",
     aliases_supported:Boolean(c.env.ADMIN_EMAIL || c.env.ADMIN_PASSWORD),
     worker:"indo-talent-erp",
-    build:"V6.43"
+    build:"V6.44"
   });
 });
 
-app.post("/api/admin/login",async c=>{try{
-  const b=await c.req.json<any>();
-  const email=String(b.email||"").trim().toLowerCase();
-  const password=String(b.password||"");
-  if(!email||!password)return c.json({error:"email_password_required"},400);
-
-  // V6.40: bootstrap credentials are checked first. This prevents a missing/legacy
-  // company_profiles schema from blocking Super Admin login with a generic 500.
-  const cfg=adminConfig(c);
-  const configuredEmail=cfg.email;
-  const configuredHash=cfg.hash;
-  const configuredPassword=cfg.password;
-  const emailConfigured=Boolean(configuredEmail);
-  const credentialConfigured=Boolean(configuredHash||configuredPassword);
-
-  if(!emailConfigured || !credentialConfigured){
-    // If bootstrap secrets are absent, still allow a durable database admin account.
-    try{
-      const r=await c.env.DB.prepare("SELECT u.id,u.company_id,u.name,u.email,u.password_hash,u.role FROM users u WHERE lower(u.email)=? AND u.role='admin' LIMIT 1").bind(email).first<any>();
-      if(r && r.password_hash && await passwordVerify(password,r.password_hash)){
-        const u:AuthUser={id:r.id,company_id:r.company_id||r.id,name:r.name||"Super Admin",email:r.email,role:"admin",company_name:"Platform"};
-        await createSession(c,u); await audit(c,u,"admin.login",u.id); return c.json({user:u,auth_source:"database"});
-      }
-    }catch{}
-    return c.json({error:"admin_not_configured",detail:"Super Admin credentials are not configured on this Worker deployment.",config:{email_configured:emailConfigured,password_configured:Boolean(configuredPassword),password_hash_configured:Boolean(configuredHash),build:"V6.43"}},503);
-  }
-
-  if(email===configuredEmail){
-    let ok=false;
-    try{ ok=configuredHash ? await passwordVerify(password,configuredHash) : password===configuredPassword; }catch{ ok=false; }
-    if(ok){
-      const u:AuthUser={id:"super-admin",company_id:"platform",name:"Super Admin",email,role:"admin",company_name:"AI Screening Platform"};
-      // Best-effort durable admin bootstrap. Never let this optional write block login.
-      try{
-        const existing=await c.env.DB.prepare("SELECT id,role FROM users WHERE lower(email)=? LIMIT 1").bind(email).first<any>();
-        if(!existing){
-          const hash=await passwordHash(password);
-          await c.env.DB.prepare("INSERT INTO users(id,role,email,password_hash,name,status,email_verified,approval_status,created_at) VALUES(?,?,?,?,?,'active',1,'approved',CURRENT_TIMESTAMP)").bind("super-admin","admin",email,hash,"Super Admin").run();
-        }
-      }catch{}
-      await createAdminSession(c,email); await audit(c,u,"admin.login",u.id); return c.json({user:u,auth_source:"bootstrap_secret"});
-    }
-  }
-
-  // Fallback to a durable DB admin account when the bootstrap email does not match.
+app.post("/api/admin/login",async c=>{
+  const stage={step:"start"};
   try{
-    const r=await c.env.DB.prepare("SELECT u.id,u.company_id,u.name,u.email,u.password_hash,u.role FROM users u WHERE lower(u.email)=? AND u.role='admin' LIMIT 1").bind(email).first<any>();
-    if(r && r.password_hash && await passwordVerify(password,r.password_hash)){
-      const u:AuthUser={id:r.id,company_id:r.company_id||r.id,name:r.name||"Super Admin",email:r.email,role:"admin",company_name:"Platform"};
-      await createSession(c,u); await audit(c,u,"admin.login",u.id); return c.json({user:u,auth_source:"database"});
-    }
-  }catch{}
+    stage.step="parse_body";
+    const b=await c.req.json<any>();
+    const email=String(b.email||"").trim().toLowerCase();
+    const password=String(b.password||"");
+    if(!email||!password)return c.json({error:"email_password_required"},400);
 
-  return c.json({error:"invalid_admin_credentials",detail:"Email atau password Super Admin tidak cocok. Pastikan credential yang dimasukkan sama persis dengan SUPER_ADMIN_EMAIL dan SUPER_ADMIN_PASSWORD pada Worker ini."},401);
-}catch(e:any){return c.json({error:"admin_login_failed",detail:String(e?.message||e),build:"V6.43"},500)}});
+    stage.step="read_config";
+    const cfg=adminConfig(c);
+    const configuredEmail=cfg.email;
+    const configuredHash=cfg.hash;
+    const configuredPassword=cfg.password;
+    const emailConfigured=Boolean(configuredEmail);
+    const credentialConfigured=Boolean(configuredHash||configuredPassword);
+
+    // V6.44: Super Admin bootstrap is completely independent from D1.
+    // No users/sessions INSERT is performed here. This prevents legacy or
+    // incomplete D1 schemas from turning a valid Super Admin login into HTTP 500.
+    if(!emailConfigured || !credentialConfigured){
+      return c.json({
+        error:"admin_not_configured",
+        detail:"Super Admin credentials are not configured on this Worker deployment.",
+        config:{email_configured:emailConfigured,password_configured:Boolean(configuredPassword),password_hash_configured:Boolean(configuredHash),build:"V6.44"}
+      },503);
+    }
+
+    if(email!==configuredEmail){
+      return c.json({error:"invalid_admin_credentials",detail:"Email atau password Super Admin tidak cocok."},401);
+    }
+
+    stage.step="verify_password";
+    let ok=false;
+    try{
+      ok=configuredHash ? await passwordVerify(password,configuredHash) : password===configuredPassword;
+    }catch{
+      ok=false;
+    }
+    if(!ok)return c.json({error:"invalid_admin_credentials",detail:"Email atau password Super Admin tidak cocok."},401);
+
+    const u:AuthUser={id:"super-admin",company_id:"platform",name:"Super Admin",email:configuredEmail,role:"admin",company_name:"AI Screening Platform"};
+
+    stage.step="create_admin_cookie";
+    try{
+      await createAdminSession(c,configuredEmail);
+    }catch(e:any){
+      return c.json({error:"admin_session_failed",detail:String(e?.message||e),stage:stage.step,build:"V6.44"},503);
+    }
+
+    // Audit is deliberately best-effort and can never block authentication.
+    stage.step="audit";
+    await audit(c,u,"admin.login",u.id);
+    return c.json({user:u,auth_source:"bootstrap_secret",build:"V6.44"});
+  }catch(e:any){
+    return c.json({error:"admin_login_failed",detail:String(e?.message||e),stage:stage.step,build:"V6.44"},500);
+  }
+});
+
 const SUPER_ADMIN_PATH = "/platform-control-7f9a2d";
 
 app.get(SUPER_ADMIN_PATH, c => { c.header("X-Robots-Tag","noindex, nofollow, noarchive"); return c.html(`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Super Admin · ${c.env.APP_NAME}</title><style>body{margin:0;background:#f5f7fb;font-family:Inter,system-ui,sans-serif;color:#10213b}.wrap{max-width:1180px;margin:40px auto;padding:0 20px}.card{background:#fff;border:1px solid #e3e8f0;border-radius:18px;padding:24px;box-shadow:0 8px 28px rgba(16,33,59,.06)}.login{max-width:420px;margin:100px auto}.brand{font-size:22px;font-weight:800;margin-bottom:22px}.input{width:100%;box-sizing:border-box;padding:12px;border:1px solid #d7deea;border-radius:10px;margin:6px 0 14px}.btn{border:0;border-radius:10px;padding:11px 15px;background:#0b66ff;color:#fff;cursor:pointer}.muted{color:#667085}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.metric b{display:block;font-size:28px;margin-top:8px}.table{width:100%;border-collapse:collapse}.table th,.table td{text-align:left;padding:12px;border-bottom:1px solid #edf0f5}.pill{padding:5px 9px;border-radius:999px;background:#eef4ff;color:#1459c7;font-size:12px}.packages{display:grid;grid-template-columns:repeat(4,1fr);gap:14px}.package{border:1px solid #dbe4ef;border-radius:14px;padding:18px}.package h3{margin:0}.price{font-size:24px;font-weight:800;margin:12px 0}.tag{font-size:12px;color:#64748b}@media(max-width:800px){.grid,.packages{grid-template-columns:1fr 1fr}}@media(max-width:560px){.grid,.packages{grid-template-columns:1fr}}</style></head><body><div id="root" class="wrap"><div class="card login"><div class="brand">AI Screening · Super Admin</div><p class="muted">Platform administration and commercial control.</p><div id="cfg" class="muted" style="font-size:12px;margin:-8px 0 16px">Checking secure configuration…</div><form id="f"><label>Email</label><input id="e" class="input" type="email" required><label>Password</label><input id="p" class="input" type="password" required><button class="btn">Sign in</button><p id="m" class="muted"></p></form></div></div><script>const $=s=>document.querySelector(s);async function api(p,o={}){const r=await fetch(p,{credentials:'same-origin',...o});const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(d.error||d.detail||'request_failed');return d}async function load(){try{const me=await api('/api/auth/me');if(me.user.role!=='admin')throw Error('admin_required');const [o,c]=await Promise.all([api('/api/admin/overview'),api('/api/admin/companies')]);$('#root').innerHTML='<div class="card"><div style="display:flex;justify-content:space-between;align-items:center"><div><div class="brand" style="margin:0">Super Admin Dashboard</div><div class="muted">Commercial, companies, usage and platform overview</div></div><button class="btn" onclick="logout()">Logout</button></div></div><div class="grid" style="margin:14px 0"><div class="card metric">Users<b>'+o.users+'</b></div><div class="card metric">Companies<b>'+o.companies+'</b></div><div class="card metric">Active jobs<b>'+o.jobs+'</b></div><div class="card metric">Revenue<b>Rp '+Number(o.revenue_idr||0).toLocaleString('id-ID')+'</b></div></div><div class="card"><h2>AI Screening Credits</h2><div class="packages">'+[{n:'Starter',c:1000,p:99000},{n:'Growth',c:5000,p:399000},{n:'Professional',c:15000,p:999000},{n:'Enterprise',c:50000,p:2999000}].map(x=>'<div class="package"><h3>'+x.n+'</h3><div class="price">Rp '+x.p.toLocaleString('id-ID')+'</div><b>'+x.c.toLocaleString('id-ID')+' credits</b><div class="tag">Customer-facing credits, not provider tokens.</div></div>').join('')+'</div></div><div class="card"><h2>Client companies</h2><div style="overflow:auto"><table class="table"><thead><tr><th>Company</th><th>Contact</th><th>Credits</th><th>Purchased</th></tr></thead><tbody>'+c.map(x=>'<tr><td><b>'+esc(x.company_name||'-')+'</b></td><td>'+esc(x.email||'-')+'</td><td><span class="pill">'+Number(x.balance||0).toLocaleString('id-ID')+'</span></td><td>'+Number(x.lifetime_purchased||0).toLocaleString('id-ID')+'</td></tr>').join('')+'</tbody></table></div></div>'}catch(e){$('#m').textContent=e.message}};api('/api/admin/config-status').then(x=>{$('#cfg').textContent=x.ok?'Secure configuration ready · '+x.auth_mode+' · '+x.configured_email_masked:'Configuration incomplete · set SUPER_ADMIN_EMAIL and SUPER_ADMIN_PASSWORD in this Worker'}).catch(()=>{$('#cfg').textContent='Configuration status unavailable'});function esc(v){return String(v??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]))}$('#f').onsubmit=async e=>{e.preventDefault();$('#m').textContent='Signing in...';try{await api('/api/admin/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:$('#e').value,password:$('#p').value})});load()}catch(x){$('#m').textContent=x.message==='admin_not_configured'?'Bootstrap Super Admin belum terlihat oleh deployment Worker ini. Pastikan Secret SUPER_ADMIN_EMAIL dan SUPER_ADMIN_PASSWORD sudah tersimpan pada Worker yang sama lalu deploy versi terbaru.':x.message==='invalid_admin_credentials'?'Email atau password Super Admin tidak cocok. Gunakan credential Super Admin, bukan login perusahaan.':x.message}};async function logout(){await api('/api/auth/logout',{method:'POST'});location.reload()}load();</script></body></html>`); });
