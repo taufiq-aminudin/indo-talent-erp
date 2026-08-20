@@ -18,13 +18,14 @@
     "OpenAI Responses API screening",
     "recruiter dashboard"
   ],
-  "version": "6.39",
+  "version": "V6.42",
   "schema": "existing-indo-talent-db",
-  "release": "super-admin-session-resolution-fix",
+  "release": "hidden-super-admin-login",
   "name": "Super Admin Bootstrap & Secret Visibility Fix",
   "features": [
     "super_admin_config_status",
     "admin_bootstrap",
     "durable_admin_account"
-  ]
+  ],
+  "super_admin_login_path": "/platform-control-7f9a2d"
 }
