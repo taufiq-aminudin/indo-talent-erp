@@ -8,7 +8,7 @@
     "Cloudflare D1",
     "Cloudflare R2"
   ],
-  "status": "v6.1-auth-tenant-upload",
+  "status": "v6.37-super-admin-session-fix",
   "modules": [
     "authentication",
     "session cookies",
@@ -18,7 +18,7 @@
     "OpenAI Responses API screening",
     "recruiter dashboard"
   ],
-  "version": "6.33",
+  "version": "6.37",
   "schema": "existing-indo-talent-db",
-  "release": "job-actions-screening-hardening"
+  "release": "super-admin-session-resolution-fix"
 }
