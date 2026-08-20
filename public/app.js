@@ -6,7 +6,7 @@ function setMode(){registerMode=!registerMode;$('#authTitle').textContent=regist
 $('#toggleAuth').onclick=e=>{e.preventDefault();setMode()};
 $('#authForm').onsubmit=async e=>{e.preventDefault();$('#authMsg').textContent='Working...';try{const path=registerMode?'/api/auth/register':'/api/auth/login';const body=registerMode?{organization_name:$('#org').value,name:$('#name').value,email:$('#email').value,password:$('#password').value}:{email:$('#email').value,password:$('#password').value};const r=await api(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});$('#auth').classList.add('hidden');$('#app').classList.remove('hidden');$('#who').textContent=r.user.name+' · '+(r.user.company_name||'');$('#authMsg').textContent='Loading dashboard...';try{await refresh();$('#authMsg').textContent=''}catch(e){$('#authMsg').textContent='Dashboard error: '+e.message}}catch(err){$('#authMsg').textContent=err.message}}
 $('#logout').onclick=async()=>{await api('/api/auth/logout',{method:'POST'});location.reload()};
-$$('.tabs button').forEach(b=>b.onclick=()=>{$$('.tabs button').forEach(x=>x.classList.add('secondary'));b.classList.remove('secondary');$$('.tab').forEach(x=>x.classList.add('hidden'));$('#'+b.dataset.tab).classList.remove('hidden');if(b.dataset.tab==='jobs')loadJobs();if(b.dataset.tab==='candidates')loadCandidates();if(b.dataset.tab==='applications')loadApps()});
+$$('.tabs button').forEach(b=>b.onclick=()=>{$$('.tabs button').forEach(x=>x.classList.add('secondary'));b.classList.remove('secondary');$$('.tab').forEach(x=>x.classList.add('hidden'));$('#'+b.dataset.tab).classList.remove('hidden');if(b.dataset.tab==='jobs')loadJobs();if(b.dataset.tab==='candidates')loadCandidates();if(b.dataset.tab==='applications')loadApps();if(b.dataset.tab==='billing')loadBilling()});
 async function loadJobs(){
   const jobs=await api('/api/jobs');
   window.jobsCache=jobs;
@@ -214,6 +214,24 @@ async function extractCv(id){
     window.extractingCv=false;
   }
 }
+async function loadProfile(){
+  const r=await api('/api/profile'); const p=r.profile||{};
+  const map={company_name:'pf_company_name',legal_name:'pf_legal_name',industry:'pf_industry',website:'pf_website',contact_name:'pf_contact_name',contact_email:'pf_contact_email',contact_phone:'pf_contact_phone',city:'pf_city',province:'pf_province',country:'pf_country',registration_number:'pf_registration_number',address:'pf_address',description:'pf_description'};
+  Object.entries(map).forEach(([k,id])=>{if($('#'+id))$('#'+id).value=p[k]||''});
+}
+async function openProfile(){await loadProfile();$('#profileModal').classList.remove('hidden')}
+function closeProfile(){$('#profileModal').classList.add('hidden')}
+async function saveProfile(e){e.preventDefault();$('#profileMsg').textContent='Saving...';const fields=['company_name','legal_name','industry','website','contact_name','contact_email','contact_phone','city','province','country','registration_number','address','description'];const body={};fields.forEach(k=>body[k]=$('#pf_'+k).value);try{await api('/api/profile',{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});$('#profileMsg').textContent='Profile updated successfully.';$('#whoName').textContent=body.contact_name||body.company_name||'Account';$('#whoCompany').textContent=body.company_name||'';setTimeout(closeProfile,600)}catch(e){$('#profileMsg').textContent='Profile update failed: '+e.message}}
+async function loadBilling(){
+  try{const d=await api('/api/billing');const w=d.wallet||{};$('#creditBalance').textContent=Number(w.balance||0).toLocaleString('id-ID')+' credits';
+    $('#creditPackages').innerHTML=(d.packages||[]).map((p,i)=>'<div class="credit-package '+(i===1?'featured':'')+'"><div class="pool-kicker">'+(p.tag||'')+'</div><h3>'+esc(p.name)+'</h3><div class="credit-price">Rp '+Number(p.price_idr).toLocaleString('id-ID')+'</div><b>'+Number(p.credits).toLocaleString('id-ID')+' credits</b><div class="credit-tag">AI Screening Credits. Provider tokens remain internal.</div><button class="btn credit-buy" onclick="buyCredits(\''+esc(p.code)+'\')">Request package</button></div>').join('');
+    $('#creditUsage').innerHTML=(d.usage||[]).length?(d.usage||[]).map(x=>'<div class="usage-card"><span>'+esc(x.operation)+'</span><b>'+Number(x.credits||0).toLocaleString('id-ID')+' credits</b><span>'+Number(x.runs||0)+' runs</span></div>').join(''):'<div class="usage-card"><span>No usage yet</span><b>0 credits</b><span>Start screening to see usage.</span></div>';
+    $('#creditOrders').innerHTML=(d.orders||[]).length?(d.orders||[]).map(x=>'<tr><td>'+esc(x.package_code)+'</td><td>'+Number(x.credits).toLocaleString('id-ID')+'</td><td>Rp '+Number(x.amount_idr).toLocaleString('id-ID')+'</td><td><span class="pill">'+esc(x.status)+'</span></td><td>'+esc(new Date(x.created_at).toLocaleString('id-ID'))+'</td></tr>').join(''):'<tr><td colspan="5" class="job-empty">No orders yet.</td></tr>';
+  }catch(e){$('#creditPackages').innerHTML='<div class="screen-error-card"><div class="screen-error-body"><strong>Billing unavailable</strong><br>'+esc(e.message)+'</div></div>'}
+}
+window.buyCredits=async code=>{try{const r=await api('/api/billing/orders',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({package_code:code})});alert('Order dibuat. Order ID: '+r.order_id+'\nStatus: pending\nSuper Admin akan memproses pembayaran dan mengaktifkan credits.');await loadBilling()}catch(e){alert('Order gagal: '+e.message)}};
+$('#profileBtn').onclick=e=>{e.stopPropagation();$('#accountMenu').classList.toggle('hidden')};$('#openProfile').onclick=()=>{closeProfile();$('#accountMenu').classList.add('hidden');openProfile()};$('#openBilling').onclick=()=>{document.querySelector('.tabs button[data-tab="billing"]').click();$('#accountMenu').classList.add('hidden')};$('#closeProfile').onclick=closeProfile;document.querySelector('[data-close-profile]')?.addEventListener('click',closeProfile);$('#profileForm').onsubmit=saveProfile;document.addEventListener('click',e=>{if(!e.target.closest('.header-account'))$('#accountMenu')?.classList.add('hidden')});
+
 async function refresh(){const d=await api('/api/dashboard');$('#mJobs').textContent=d.jobs;$('#mCandidates').textContent=d.candidates;$('#mApplications').textContent=d.applications;$('#mStrong').textContent=d.strong_matches;await loadJobs()}
 $('#jobForm').onsubmit=async e=>{
   e.preventDefault();
@@ -283,5 +301,5 @@ window.ai=async id=>{
 }
 function showResult(x){renderScreeningResult(x)}
 function esc(s){return String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]))}
-async function boot(){try{const r=await api('/api/auth/me');$('#auth').classList.add('hidden');$('#app').classList.remove('hidden');$('#who').textContent=r.user.name+' · '+(r.user.company_name||'');await refresh();$('#authMsg').textContent=''}catch(e){$('#authMsg').textContent='Login/session error: '+e.message;$('#auth').classList.remove('hidden');$('#app').classList.add('hidden')}}
+async function boot(){try{const r=await api('/api/auth/me');$('#auth').classList.add('hidden');$('#app').classList.remove('hidden');$('#whoName').textContent=r.user.name||'Account';$('#whoCompany').textContent=r.user.company_name||'';if(r.user.role==='admin')$('#superAdminLink').classList.remove('hidden');await refresh();$('#authMsg').textContent=''}catch(e){$('#authMsg').textContent='Login/session error: '+e.message;$('#auth').classList.remove('hidden');$('#app').classList.add('hidden')}}
 boot();
