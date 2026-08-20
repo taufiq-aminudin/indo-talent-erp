@@ -54,7 +54,7 @@ The foundation now includes authentication, tenant-isolated protected routes, D1
 V6.41: Super Admin login hardening included.
 
 
-## V6.42 — Hidden Super Admin Login
+## V6.43 — Hidden Super Admin Login
 - Super Admin login is no longer exposed in the normal company profile/account menu.
 - Hidden login route: `/platform-control-7f9a2d`
 - The route sends `X-Robots-Tag: noindex, nofollow, noarchive`.
