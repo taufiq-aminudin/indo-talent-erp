@@ -50,12 +50,27 @@ async function currentUser(c:any):Promise<AuthUser|null>{
   const raw=cookieToken(c.req.raw);
   if(!raw)return null;
   try{
+    const tokenHash=await sha256(raw);
+    const session=await c.env.DB.prepare(
+      "SELECT user_id FROM sessions WHERE token=? AND expires_at>CURRENT_TIMESTAMP LIMIT 1"
+    ).bind(tokenHash).first<any>();
+    if(!session)return null;
+    if(session.user_id==="super-admin"){
+      if(!c.env.SUPER_ADMIN_EMAIL)return null;
+      return {
+        id:"super-admin",
+        company_id:"platform",
+        name:"Super Admin",
+        email:c.env.SUPER_ADMIN_EMAIL.toLowerCase(),
+        role:"admin",
+        company_name:"AI Screening Platform"
+      };
+    }
     const row=await c.env.DB.prepare(
       "SELECT u.id,u.company_id,u.name,u.email,u.role,COALESCE(cp.company_name,u.name) company_name " +
-      "FROM sessions s JOIN users u ON u.id=s.user_id " +
-      "LEFT JOIN company_profiles cp ON cp.user_id=u.company_id " +
-      "WHERE s.token=? AND s.expires_at>CURRENT_TIMESTAMP LIMIT 1"
-    ).bind(await sha256(raw)).first<AuthUser>();
+      "FROM users u LEFT JOIN company_profiles cp ON cp.user_id=u.company_id " +
+      "WHERE u.id=? LIMIT 1"
+    ).bind(session.user_id).first<AuthUser>();
     return row||null;
   }catch(e:any){
     throw new Error("session_lookup_failed: "+String(e?.message||e));
