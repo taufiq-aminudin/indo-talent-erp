@@ -50,3 +50,5 @@ AI output is decision support, not an automatic hiring decision.
 ## V6.1 update
 
 The foundation now includes authentication, tenant-isolated protected routes, D1-backed sessions, R2 CV upload, a recruiter dashboard, rule-based screening, and an OpenAI Responses API screening endpoint. Apply `migrations/0002_auth_uploads.sql` to `indo-talent-db` before using the new authenticated routes.
+
+V6.40: Super Admin login hardening included.
