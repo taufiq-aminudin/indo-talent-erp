@@ -301,5 +301,5 @@ window.ai=async id=>{
 }
 function showResult(x){renderScreeningResult(x)}
 function esc(s){return String(s??'').replace(/[&<>'"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[m]))}
-async function boot(){try{const r=await api('/api/auth/me');$('#auth').classList.add('hidden');$('#app').classList.remove('hidden');$('#whoName').textContent=r.user.name||'Account';$('#whoCompany').textContent=r.user.company_name||'';if(r.user.role==='admin')$('#superAdminLink').classList.remove('hidden');await refresh();$('#authMsg').textContent=''}catch(e){$('#authMsg').textContent='Login/session error: '+e.message;$('#auth').classList.remove('hidden');$('#app').classList.add('hidden')}}
+async function boot(){try{const r=await api('/api/auth/me');$('#auth').classList.add('hidden');$('#app').classList.remove('hidden');$('#whoName').textContent=r.user.name||'Account';$('#whoCompany').textContent=r.user.company_name||'';await refresh();$('#authMsg').textContent=''}catch(e){$('#authMsg').textContent='Login/session error: '+e.message;$('#auth').classList.remove('hidden');$('#app').classList.add('hidden')}}
 boot();
